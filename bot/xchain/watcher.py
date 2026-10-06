@@ -116,6 +116,8 @@ class XchainWatcher:
     async def _price_later(self, t: XTrade, leader: str, evm: str):
         """Relay /price for the same size, ~price_delay_s after his trade: our realistic fill."""
         at = (t.deposit_ts or time.time()) + self.price_delay
+        if time.time() - at > 60:            # found late (startup poll): a price now isn't "+15 s"
+            return
         await asyncio.sleep(max(0.0, at - time.time()))
         if t.side == "buy":
             usdc = int(round(t.usd * 1e6))

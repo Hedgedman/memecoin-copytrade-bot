@@ -114,9 +114,9 @@ class Store:
         self.db.commit()
 
     def xtrade_count_from(self, evm: str, chain: str, since: float) -> int:
-        """Relay requests that started on `chain` from `evm` (his sells there) since `since`."""
+        """Relay requests that started on `chain` from `evm` (his sells / bridges there) since `since`."""
         return self.db.execute("SELECT COUNT(*) FROM xchain_trades WHERE evm_address=? AND chain=? "
-                               "AND side='sell' AND deposit_ts>=?", (evm, chain, since)).fetchone()[0]
+                               "AND side IN ('sell','bridge') AND deposit_ts>=?", (evm, chain, since)).fetchone()[0]
 
     def record_factor(self, token: str, ts: float, factor: float):
         """Calibration of a pool price against Jupiter (real value / pool-model value)."""

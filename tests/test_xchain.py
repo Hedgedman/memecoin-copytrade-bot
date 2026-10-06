@@ -1,12 +1,12 @@
 """Cross-chain watch-only (phase 1), on recorded data, no network: python -m tests.test_xchain
 
-Solana txs and /price responses are real recordings. The /requests/v3 fixture is RECONSTRUCTED
-from real v2 responses (v3 needs an API key): see its _note."""
+Solana txs, /price and /requests/v3 responses are real recordings (see the fixtures' _note)."""
 import asyncio
 import json
 import logging
 import os
 import tempfile
+import time
 
 from bot.chains.solana import SolanaAdapter
 from bot.store import Store
@@ -25,7 +25,7 @@ def load(name):
 
 DEP_RH, DEP_BSC = load("tx_relay_deposit_rh_Leader-A.json"), load("tx_relay_deposit_bsc_Leader-A.json")
 PAYOUT = load("tx_relay_payout_rh_Leader-A.json")
-REQS = load("relay_v3_reconstructed_Leader-A.json")["requests"]          # rh buy, bsc buy, rh sell
+REQS = load("relay_v3_Leader-A.json")["requests"]      # rh buy, bsc buy, rh sell, refund, WETH + USDC bridge
 PRICE = {"bsc": load("relay_price_bsc.json"), "robinhood": load("relay_price_robinhood.json")}
 sig = lambda tx: tx["transaction"]["signatures"][0]
 
@@ -38,7 +38,7 @@ def parser_tests():
     assert relay_tx_kind(DEP_RH, EVM) is None                            # someone else's deposit
     assert relay_tx_kind(load("tx_v1_usdc_buy_Leader-G.json"), "Leader-G") is None
 
-    buy, bsc, sell = (parse_request(r) for r in REQS)
+    buy, bsc, sell, refund, weth, usdc = (parse_request(r) for r in REQS)
     assert (buy.side, buy.chain, buy.chain_id, buy.symbol) == ("buy", "robinhood", 4663, "MININGMART")
     assert buy.token_amount == 28715964887607914656283786 and buy.decimals == 18   # > 64 bits
     assert abs(buy.usd - 1199.8824) < 1e-6 and abs(buy.price_usd - 4.1784e-05) < 1e-8
@@ -47,17 +47,27 @@ def parser_tests():
     assert (sell.side, sell.chain, sell.symbol) == ("sell", "robinhood", "PRIORS")
     assert sell.fill_tx == sig(PAYOUT) and abs(sell.token_ui - 205769.6196) < 1e-3
     assert parse_request({"id": "x", "data": {}}) is None
+    assert (refund.status, refund.side, refund.chain, refund.token_amount, refund.price_usd) == \
+        ("refund", "buy", "ethereum", 0, None)                           # USDC came back, no tokens
+    assert (weth.side, weth.chain, weth.symbol) == ("bridge", "robinhood", "WETH")    # not a token exit
+    assert (usdc.side, usdc.chain, usdc.symbol) == ("bridge", "base", "USDC")
 
     amount, usd, impact = parse_price(PRICE["robinhood"])
     assert abs(amount - 28828282.34) < 0.01 and abs(usd - 93.118498) < 1e-6 and impact == -6.87
     assert parse_price({}) is None
-    print("parsers: Relay deposit/payout txs, v3 requests (buy/sell, >64-bit amounts), /price")
+    print("parsers: Relay deposit/payout txs, v3 requests (buy/sell/refund/bridge, >64-bit amounts), /price")
+
+
+def fresh(r, age_s=0):
+    """The recorded request as if his deposit happened age_s ago."""
+    data = dict(r["data"], inTxs=[dict(r["data"]["inTxs"][0], timestamp=int(time.time() - age_s))])
+    return dict(r, data=data)
 
 
 class FakeRelay:
-    """Stands in for RelayClient: answers like /requests/v3 and /price."""
-    def __init__(self, key=True, pending_first=0):
-        self.has_key, self.calls, self.pending = key, [], pending_first
+    """Stands in for RelayClient: answers like /requests/v3 and /price (deposits age_s old)."""
+    def __init__(self, key=True, pending_first=0, age_s=0):
+        self.has_key, self.calls, self.pending, self.age = key, [], pending_first, age_s
 
     async def requests(self, **params):
         self.calls.append(params)
@@ -71,6 +81,7 @@ class FakeRelay:
             hits = [r for r in REQS if r["id"] == params["id"]]
         else:
             hits = list(REQS) if params.get("user") == W else []
+        hits = [fresh(h, self.age) for h in hits]
         if self.pending > 0:                     # Relay hasn't settled it yet
             self.pending -= 1
             return [dict(h, status="pending") for h in hits]
@@ -111,18 +122,32 @@ async def flow_tests():
     # payout (solver signs, not him) -> resolved by fillTxHash -> sell; poll later finds nothing new
     w.on_solana_tx(W, sig(PAYOUT), PAYOUT)
     await asyncio.sleep(0.1)
-    await w.poll_once(3600)                             # poll returns all 3: only the BSC buy is new
+    await w.poll_once(3600)                             # poll returns all 6: the stream's 2 aren't new
     await asyncio.sleep(0.1)
     rows = dict(store.db.execute("SELECT symbol, detected_via FROM xchain_trades").fetchall())
-    assert rows == {"MININGMART": "stream", "PRIORS": "stream", "ZKBNB": "poll"}, rows
+    assert rows == {"MININGMART": "stream", "PRIORS": "stream", "ZKBNB": "poll", "GRAPHFUND": "poll",
+                    "WETH": "poll", "USDC": "poll"}, rows
+    acts = dict(store.db.execute("SELECT token, action FROM signals WHERE action != 'xchain_buy'").fetchall())
+    assert sorted(acts.values()) == ["xchain_bridge", "xchain_bridge", "xchain_sell"], acts
+    priced = [c["price"]["destinationCurrency"] for c in client.calls if "price" in c]
+    assert len(priced) == 3                             # buys + sell only: no refund, no bridges
     sell_price = [c["price"] for c in client.calls if "price" in c and c["price"]["originChainId"] == 4663][0]
     assert sell_price["originCurrency"] == REQS[2]["data"]["route"]["actual"]["origin"]["inputCurrency"]["currency"]["address"]
-    assert store.db.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 3
+    assert store.db.execute("SELECT COUNT(*) FROM signals").fetchone()[0] == 6
     # not a leader / not Relay: ignored
     w.on_solana_tx("someone", sig(DEP_RH), DEP_RH)
     w.on_solana_tx(W, "x", load("tx_v1_usdc_buy_Leader-G.json"))
     assert store.db.execute("SELECT COUNT(*) FROM leader_events").fetchone()[0] == 2
     print("flow: deposit -> pending -> success -> trade + signal + price; payout -> sell; poll dedupes")
+
+    # startup poll finds trades from up to an hour ago: recorded, but no misleading "+15 s" price
+    client = FakeRelay(age_s=1800)
+    w, store = watcher(client)
+    await w.poll_once(3600)
+    await asyncio.sleep(0.1)
+    assert store.db.execute("SELECT COUNT(*) FROM xchain_trades").fetchone()[0] == 6
+    assert not [c for c in client.calls if "price" in c]
+    print("late: trades found 30 min after the fact are stored but not priced")
 
     # no API key: detection still logged, nothing resolved, no crash, clear warning once
     w, store = watcher(FakeRelay(key=False))

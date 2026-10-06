@@ -25,6 +25,9 @@ SOLANA_CHAIN_ID = 792703809                      # Relay's id for Solana
 USDC_SOL = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 CHAIN_NAMES = {SOLANA_CHAIN_ID: "solana", 4663: "robinhood", 56: "bsc", 1: "ethereum", 8453: "base"}
 FINAL = ("success", "refund", "failure")
+# Moving these between chains is cash management, not a token trade (live v3: after selling a token
+# on an EVM DEX he bridges the WETH/WBNB/USDC back to Solana) -> side "bridge".
+QUOTE_SYMBOLS = {"USDC", "USDT", "USDC.E", "DAI", "ETH", "WETH", "BNB", "WBNB"}
 
 
 def _owner_delta(tx: dict, owner: str, mint: str) -> int:
@@ -66,7 +69,7 @@ def memo_request_ids(tx: dict) -> list[str]:
 class XTrade:
     request_id: str
     status: str
-    side: str                 # buy (Solana -> EVM), sell (EVM -> Solana), other
+    side: str                 # buy (Solana -> EVM), sell (EVM -> Solana), bridge (USDC/WETH/..), other
     chain: str                # the non-Solana chain (robinhood, bsc, ethereum, base, chain-<id>)
     chain_id: int
     token: str                # token address on that chain
@@ -124,11 +127,15 @@ def parse_request(req: dict) -> XTrade | None:
         side, tok, quote = "other", cout, cin
     c = tok["currency"]
     cid = int(c.get("chainId") or 0)
+    if side in ("buy", "sell") and (c.get("symbol") or "").upper() in QUOTE_SYMBOLS:
+        side = "bridge"
+    status = req.get("status", "")
     ins, outs = data.get("inTxs") or [], data.get("outTxs") or []
-    t = XTrade(request_id=req.get("id", ""), status=req.get("status", ""), side=side,
+    t = XTrade(request_id=req.get("id", ""), status=status, side=side,
                chain=CHAIN_NAMES.get(cid, f"chain-{cid}"), chain_id=cid, token=c.get("address", ""),
                symbol=c.get("symbol", ""), decimals=int(c.get("decimals") or 0),
-               token_amount=int(tok.get("amount") or 0),
+               # refund: the route still shows the quoted tokens, but he got his USDC back (outTx = refund)
+               token_amount=0 if status == "refund" else int(tok.get("amount") or 0),
                usd=_usd(quote) or _usd(tok), sender=req.get("sender") or req.get("user") or "",
                recipient=req.get("recipient", ""), raw=req)
     if ins:
