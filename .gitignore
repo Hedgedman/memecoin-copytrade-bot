@@ -7,3 +7,4 @@ __pycache__/
 .idea/
 backup/
 bot/chains/solana_backup*.py
+data/
