@@ -1,0 +1,6 @@
+aiohttp>=3.9
+eth-account>=0.10
+eth-abi>=4
+websockets>=12
+solders>=0.21
+pyyaml>=6

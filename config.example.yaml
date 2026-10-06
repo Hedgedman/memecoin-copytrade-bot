@@ -1,0 +1,96 @@
+# Copy to config.yaml. Keys are read from ENV VARS, never from this file.
+paper: true              # true = real quotes, no transactions sent. Start here.
+db_path: copybot.db
+log_file: copybot.log
+log_level: INFO
+
+chains:
+  solana:
+    enabled: true
+    rpc_http: "https://YOUR-RPC-PROVIDER"      # paid RPC (Helius/Triton/...) strongly advised
+    rpc_ws: "wss://YOUR-RPC-PROVIDER"
+    private_key_env: SOL_PRIVATE_KEY            # base58 key of a DEDICATED bot wallet
+    jupiter_base: "https://lite-api.jup.ag/swap/v1"   # verify current Jupiter endpoint
+    jupiter_api_key_env: JUPITER_API_KEY        # optional, for paid tier
+    leaders: []                                 # wallet addresses you want to follow
+    buy_amount: 2.5          # SOL per trade - set to your ~$500 equivalent
+    min_leader_buy_sol: 0.5  # ignore leader buys smaller than this
+    max_signal_age_s: 5      # skip if leader tx is older than this when we see it
+    slippage_bps: 1500       # 15% max slippage on entry
+    max_priority_fee_lamports: 2000000   # cap on priority fee per tx (0.002 SOL)
+    only_first_leader_buy: false   # true = skip buys of tokens the leader already held
+    min_market_cap_usd: 30000   # skip micro caps (0 = off); bot-scale, approximate
+    max_market_cap_usd: 500000  # 0 = off
+    max_roundtrip_loss: 0.08 # skip if buy->sell quote loses more than 8%
+    reject_freeze_authority: true
+    reject_mint_authority: true
+    confirm_timeout_s: 60
+    daily_loss_limit: 5      # SOL; no new buys after this realized loss today
+    # --- pool pricing (no Jupiter calls for checks, marks, stops and paper fills) ---
+    detection: auto          # auto = Helius transactionSubscribe if your plan allows, else logsSubscribe
+    vault_pricing_venues: [meteora_damm_v2]   # pool price from vault balances x Jupiter calibration
+    vault_check_s: 20        # re-calibrate open vault-priced positions this often
+    pool_pricing_venues: [pumpfun_curve, pumpswap_amm]   # remove one to fall back to Jupiter for it
+    pumpfun_fee_bps: 125     # CALIBRATE with calibrate.py - fee models change
+    pumpswap_fee_bps: 30     # CALIBRATE with calibrate.py
+    paper_land_delay_s: 1.5  # paper: fill on the pool state this long after deciding (live tx landing time)
+    tick_tail_s: 900         # keep recording pool updates 15 min after a close or skip (uncensored what-ifs)
+    max_watched_pools: 60    # cap on websocket subscriptions; open positions are never dropped
+    record_skipped: true
+    live_price_check_s: 60   # live only: re-measure pool price vs Jupiter for open positions     # also record price paths of signals you skipped
+
+  bsc:
+    enabled: false
+    type: evm
+    chain_id: 56
+    rpc_http: "https://YOUR-BSC-RPC"           # paid RPC advised
+    send_rpc: ""                               # optional private/builder RPC for sending txs
+    private_key_env: BSC_PRIVATE_KEY
+    router_v2: "0x10ED43C718714eb63d5aA57B78B54704E256024E"   # PancakeSwap V2 router - verify on BscScan
+    leaders: []
+    buy_amount: 0.65          # BNB per trade - set to your ~$500 equivalent
+    min_leader_buy: 0.3       # BNB
+    max_signal_age_s: 5
+    slippage_bps: 1500
+    max_roundtrip_loss: 0.08
+    log_poll_s: 0.3
+    gas_price_multiplier: 1.2 # on BSC a higher gas price CAN improve ordering
+    max_gas_price_gwei: 10
+    gas_limit_swap: 400000
+    confirm_timeout_s: 30
+    daily_loss_limit: 1.5     # BNB
+
+  robinhood:
+    enabled: false
+    type: evm
+    chain_id: 4663
+    rpc_http: "https://YOUR-ROBINHOOD-RPC"     # public rpc.mainnet.chain.robinhood.com is rate-limited, not for production
+    send_rpc: ""
+    private_key_env: ROBINHOOD_PRIVATE_KEY
+    router_v2: "0xFILL_ME"    # Uniswap V2 router on 4663: take it from Uniswap's official deployments list and verify on robinhoodchain.blockscout.com
+    leaders: []
+    buy_amount: 0.2           # ETH per trade - set to your ~$500 equivalent
+    min_leader_buy: 0.05      # ETH
+    max_signal_age_s: 3       # ~100 ms blocks: stale fast
+    slippage_bps: 1500
+    max_roundtrip_loss: 0.08
+    log_poll_s: 0.15
+    gas_price_multiplier: 1.0 # FCFS sequencer: paying more does NOT get you earlier. Speed does.
+    max_gas_price_gwei: 1
+    gas_limit_swap: 600000
+    confirm_timeout_s: 15
+    daily_loss_limit: 0.4     # ETH
+
+exits:
+  take_profit: 0.20
+  stop_loss: 0.04          # see README: expect real losses well beyond this
+  max_hold_s: 600
+  follow_leader_exit: true # sell when the leader you copied sells that token
+  poll_interval_s: 1.0     # pool-priced tokens are ALSO checked on every pool update
+  mark_interval_s: 1.0     # at most one saved mark per second per position (full detail is in `ticks`)
+  max_quote_failures: 20
+
+risk:
+  max_open_positions: 3
+  reentry_cooldown_s: 1800
+  kill_switch_file: STOP   # `touch STOP` blocks all new buys instantly
