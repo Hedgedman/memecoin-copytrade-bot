@@ -313,7 +313,7 @@ class SolanaAdapter(ChainAdapter):
         for i in range(tries):
             try:
                 tx = await self._rpc("getTransaction", [sig, {
-                    "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
+                    "encoding": "jsonParsed", "maxSupportedTransactionVersion": 1,
                     "commitment": "confirmed"}])
                 if tx:
                     return tx
@@ -650,7 +650,7 @@ class SolanaAdapter(ChainAdapter):
                                                           "vote": False},
                                                          {"commitment": "processed", "encoding": "jsonParsed",
                                                           "transactionDetails": "full",
-                                                          "maxSupportedTransactionVersion": 0}]}))
+                                                          "maxSupportedTransactionVersion": 1}]}))
                     ack = json.loads(await asyncio.wait_for(ws.recv(), 15))
                     if "error" in ack:
                         if not worked:
@@ -665,24 +665,43 @@ class SolanaAdapter(ChainAdapter):
                         m = json.loads(raw)
                         if m.get("method") != "transactionNotification":
                             continue
-                        res = m["params"]["result"]
-                        tx = tx_from_notification(res)
-                        sig = res.get("signature") or (tx or {}).get("transaction", {}).get("signatures", [None])[0]
-                        if not sig or self._mark_seen(sig):
-                            continue
-                        leader = signing_leader(tx, leaders)
-                        if leader:
-                            asyncio.create_task(self._handle(sig, leader, queue, notified, tx=tx))
-                        elif tx:
-                            mentioned = mentioned_leader(tx, leaders)
-                            if mentioned:
-                                self._event(mentioned, sig, "not_signer",
-                                            detail="leader in tx but did not sign (platform/smart wallet, "
-                                                   "transfer to him, or someone else's tx)")
+                        self._on_tx_notification(m["params"]["result"], leaders, queue, notified)
             except Exception as e:
                 log.warning("transaction stream dropped (%s); reconnecting in %ss", e, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+
+    def _on_tx_notification(self, res: dict, leaders: set, queue: asyncio.Queue, notified: float):
+        tx = tx_from_notification(res)
+        sig = res.get("signature") or (tx or {}).get("transaction", {}).get("signatures", [None])[0]
+        if not sig or self._mark_seen(sig):
+            return
+        if tx is None or res.get("error") is not None:
+            # e.g. {"error": {"UnsupportedTransactionVersion": 2}}: never drop a leader tx silently
+            asyncio.create_task(self._recover(sig, res, leaders, queue, notified))
+            return
+        leader = signing_leader(tx, leaders)
+        if leader:
+            asyncio.create_task(self._handle(sig, leader, queue, notified, tx=tx))
+        else:
+            mentioned = mentioned_leader(tx, leaders)
+            if mentioned:
+                self._event(mentioned, sig, "not_signer",
+                            detail="leader in tx but did not sign (platform/smart wallet, "
+                                   "transfer to him, or someone else's tx)")
+
+    async def _recover(self, sig: str, res: dict, leaders: set, queue: asyncio.Queue, notified: float):
+        """A stream notification without a usable transaction. Log it, record a 'tx_error' leader
+        event, and still try to copy it via getTransaction (works if only the stream failed)."""
+        err = res.get("error")
+        detail = json.dumps(err) if err is not None else "unexpected notification shape"
+        log.warning("leader tx %s arrived without a usable transaction (%s); trying getTransaction", sig, detail)
+        tx = await self._get_tx(sig, tries=3)
+        signer = signing_leader(tx, leaders)
+        # this stream only carries leader txs; "unknown" = we couldn't fetch it to see which leader
+        self._event(signer or mentioned_leader(tx, leaders) or "unknown", sig, "tx_error", detail=detail)
+        if signer:
+            await self._handle(sig, signer, queue, notified, tx=tx)
 
     async def _listen_logs(self, queue: asyncio.Queue):
         backoff = 1

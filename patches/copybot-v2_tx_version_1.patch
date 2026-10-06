@@ -1,0 +1,31 @@
+--- a/bot/chains/solana.py	2026-10-06 16:11:07
++++ b/bot/chains/solana.py	2026-10-06 16:11:15
+@@ -311,7 +311,7 @@
+         for i in range(tries):
+             try:
+                 tx = await self._rpc("getTransaction", [sig, {
+-                    "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
++                    "encoding": "jsonParsed", "maxSupportedTransactionVersion": 1,
+                     "commitment": "confirmed"}])
+                 if tx:
+                     return tx
+@@ -637,7 +637,7 @@
+                                                           "vote": False},
+                                                          {"commitment": "processed", "encoding": "jsonParsed",
+                                                           "transactionDetails": "full",
+-                                                          "maxSupportedTransactionVersion": 0}]}))
++                                                          "maxSupportedTransactionVersion": 1}]}))
+                     ack = json.loads(await asyncio.wait_for(ws.recv(), 15))
+                     if "error" in ack:
+                         if not worked:
+@@ -656,6 +656,10 @@
+                         tx = tx_from_notification(res)
+                         sig = res.get("signature") or (tx or {}).get("transaction", {}).get("signatures", [None])[0]
+                         if not sig or self._mark_seen(sig):
++                            continue
++                        if tx is None or res.get("error") is not None:   # never drop a leader tx silently
++                            log.warning("leader tx %s arrived without a usable transaction (%s)",
++                                        sig, json.dumps(res.get("error")))
+                             continue
+                         leader = signing_leader(tx, leaders)
+                         if leader:
