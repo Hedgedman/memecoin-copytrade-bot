@@ -106,7 +106,7 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
     # read-only, so it is safe to point --db at the live bot's database while it runs
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
-    rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader FROM positions WHERE paper=? AND "
+    rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader FROM positions WHERE paper=? AND chain='solana' AND "
                       "status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
     out, skipped, mc_out = [], 0, 0
     for pid, token, amount, cost, opened, leader in rows:

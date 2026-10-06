@@ -43,7 +43,7 @@ def main():
     ap.add_argument("--from-id", type=int, default=1)
     args = ap.parse_args()
     db = sqlite3.connect(args.db)
-    rows = db.execute("SELECT id, cost, ref_value, exit_value, timing, paper FROM positions WHERE id>=? "
+    rows = db.execute("SELECT id, cost, ref_value, exit_value, timing, paper FROM positions WHERE id>=? AND chain='solana' "
                       "ORDER BY id", (args.from_id,)).fetchall()
     groups: dict[str, dict[str, list]] = {}
     for pid, cost, ref, exit_value, timing, paper in rows:

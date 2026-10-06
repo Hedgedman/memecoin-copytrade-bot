@@ -39,6 +39,12 @@ class Store:
             price_later_ts REAL, price_later_usd REAL, price_later_impact_pct REAL,
             price_later_out_usd REAL, raw TEXT);
         CREATE INDEX IF NOT EXISTS xchain_trades_leader ON xchain_trades(leader, ts);
+        CREATE TABLE IF NOT EXISTS xchain_fills(
+            id INTEGER PRIMARY KEY, ts REAL, position_id INTEGER, chain TEXT, token TEXT, symbol TEXT,
+            side TEXT, reason TEXT, fraction REAL, his_ref TEXT, his_ts REAL, his_usd REAL,
+            his_price_usd REAL, our_usd REAL, our_tokens TEXT, our_price_usd REAL, gap_pct REAL,
+            delay_s REAL, impact_pct REAL, gas_usd REAL);
+        CREATE INDEX IF NOT EXISTS xchain_fills_pos ON xchain_fills(position_id, ts);
         """)
         self.db.commit()
         for table, col, typ in (("signals", "venues", "TEXT"), ("positions", "ref_value", "REAL"),
@@ -118,6 +124,27 @@ class Store:
         return self.db.execute("SELECT COUNT(*) FROM xchain_trades WHERE evm_address=? AND chain=? "
                                "AND side IN ('sell','bridge') AND deposit_ts>=?", (evm, chain, since)).fetchone()[0]
 
+    def xtrade_has_deposit(self, tx_hash: str) -> bool:
+        """A Relay request with this deposit tx is already recorded (his EVM transfer was a Relay sell)."""
+        return bool(self.db.execute("SELECT 1 FROM xchain_trades WHERE lower(deposit_tx)=? LIMIT 1",
+                                    (tx_hash.lower(),)).fetchone())
+
+    def update_position(self, p: Position):
+        """Paper xchain position after an add-on buy or a partial sell (amount, cost, timing JSON)."""
+        self.db.execute("UPDATE positions SET token_amount=?, cost=?, timing=? WHERE id=?",
+                        (str(p.token_amount), p.cost, json.dumps(p.timing), p.id))
+        self.db.commit()
+
+    def record_xfill(self, **f) -> int:
+        """One paper fill of an xchain position: his trade vs our Relay quote (bot/xchain/paper.py)."""
+        cols = ("ts", "position_id", "chain", "token", "symbol", "side", "reason", "fraction", "his_ref",
+                "his_ts", "his_usd", "his_price_usd", "our_usd", "our_tokens", "our_price_usd", "gap_pct",
+                "delay_s", "impact_pct", "gas_usd")
+        cur = self.db.execute(f"INSERT INTO xchain_fills({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
+                              tuple(str(f[c]) if c == "our_tokens" else f.get(c) for c in cols))
+        self.db.commit()
+        return cur.lastrowid
+
     def record_factor(self, token: str, ts: float, factor: float):
         """Calibration of a pool price against Jupiter (real value / pool-model value)."""
         self.db.execute("INSERT INTO pool_factors VALUES(?,?,?)", (ts, token, factor))
@@ -127,9 +154,11 @@ class Store:
         self.db.execute("UPDATE positions SET ref_value=? WHERE id=?", (p.ref_value, p.id))
         self.db.commit()
 
-    def load_open(self, paper: bool) -> list[Position]:
+    def load_open(self, paper: bool, chains=None) -> list[Position]:
         rows = self.db.execute("SELECT id,chain,token,leader,token_amount,cost,opened_at,entry_sig,ref_value,timing "
                                "FROM positions WHERE status!='closed' AND paper=?", (int(paper),))
+        if chains is not None:
+            rows = [r for r in rows if r[1] in chains]
         out = []
         for r in rows:
             p = Position(r[0], r[1], r[2], r[3], int(r[4]), r[5], r[6], r[7], paper)

@@ -157,6 +157,39 @@ def parse_price(resp: dict) -> tuple[float, float, float | None] | None:
     return amount, _usd(out), float(impact) if impact not in (None, "") else None
 
 
+def price_body(side: str, sol_user: str, evm_user: str, chain_id: int, token: str, amount_raw: int) -> dict:
+    """POST /price body. buy: amount_raw Solana USDC -> token; sell: amount_raw token -> Solana USDC."""
+    if side == "buy":
+        return {"user": sol_user, "recipient": evm_user, "originChainId": SOLANA_CHAIN_ID,
+                "destinationChainId": chain_id, "originCurrency": USDC_SOL, "destinationCurrency": token,
+                "amount": str(amount_raw), "tradeType": "EXACT_INPUT"}
+    return {"user": evm_user, "recipient": sol_user, "originChainId": chain_id,
+            "destinationChainId": SOLANA_CHAIN_ID, "originCurrency": token, "destinationCurrency": USDC_SOL,
+            "amount": str(amount_raw), "tradeType": "EXACT_INPUT"}
+
+
+@dataclass
+class Quote:
+    out_raw: int              # output in raw units, after Relay's fees (currencyOut is net of relayer fees)
+    out_ui: float             # output in token units (USDC units = USD for sells)
+    gas_usd: float            # origin-chain gas, paid on top (SOL on buys, ETH/BNB on sells)
+    impact_pct: float | None
+
+
+def parse_quote(resp: dict) -> Quote | None:
+    """POST /price response -> Quote (what we'd get for our own size), None if no route."""
+    d = (resp or {}).get("details") or {}
+    out = d.get("currencyOut") or {}
+    try:
+        q = Quote(int(out["amount"]), float(out["amountFormatted"]),
+                  _usd(((resp or {}).get("fees") or {}).get("gas") or {}), None)
+    except (KeyError, TypeError, ValueError):
+        return None
+    impact = (d.get("totalImpact") or {}).get("percent")
+    q.impact_pct = float(impact) if impact not in (None, "") else None
+    return q if q.out_raw > 0 else None
+
+
 class RelayClient:
     """GET /requests/v3 (needs an API key) and POST /price. Never raises on HTTP errors:
     returns None and logs, so the bot keeps running."""

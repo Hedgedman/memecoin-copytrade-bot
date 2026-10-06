@@ -12,6 +12,7 @@ from .models import Position, Signal
 from .positions import PositionManager
 from .risk import RiskManager
 from .store import Store
+from .xchain.paper import XchainPaperTrader
 from .xchain.watcher import XchainWatcher
 
 log = logging.getLogger("main")
@@ -49,6 +50,13 @@ class Bot:
         if xc.get("enabled") and "solana" in self.adapters:   # watch-only: never trades
             self.xchain = XchainWatcher(xc, self.store)
             self.adapters["solana"].set_xchain_sink(self.xchain.on_solana_tx)
+            pt = xc.get("paper_trading") or {}
+            if pt.get("enabled"):                              # phase 2: simulated fills only, own limits
+                if self.paper:
+                    self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, xc.get("leaders") or {},
+                                                           cfg["risk"].get("kill_switch_file", "STOP"))
+                else:
+                    log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")
 
     def _skip(self, s: Signal, why: str):
         self.store.log_signal(s, "skip", why)
@@ -126,7 +134,7 @@ class Bot:
     async def run(self):
         for a in self.adapters.values():
             await a.start()
-        for p in self.store.load_open(self.paper):
+        for p in self.store.load_open(self.paper, chains=self.adapters):   # xchain positions: own manager
             log.warning("resuming open position %s", p.token)
             self.pm.add(p)
         tasks = [asyncio.create_task(a.listen(self.queue)) for a in self.adapters.values()]

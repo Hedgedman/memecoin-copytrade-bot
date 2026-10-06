@@ -108,3 +108,19 @@ xchain:
   rpc_env:                            # optional EVM nonce check (non-Relay EVM activity); public RPCs are fine
     robinhood: ROBINHOOD_RPC_URL      # e.g. https://rpc.mainnet.chain.robinhood.com (chain id 4663)
     bsc: BSC_RPC_URL                  # e.g. https://bsc-dataseed.bnbchain.org (chain id 56)
+  rpc_public:                         # free fallback if the env var is unset (eth_call + address-filtered eth_getLogs, ~1 h back)
+    bsc: "https://bsc-rpc.publicnode.com"
+  # --- phase 2: PAPER trading of his robinhood/bsc trades. Simulated fills (Relay quotes), never trades.
+  paper_trading:
+    enabled: false                    # needs paper: true (refused otherwise)
+    chains: [robinhood, bsc]
+    size_mult: 0.4                    # our USD = 0.4 x his USD per buy (add-ons too)
+    max_usd_per_token: 2000           # cap per token incl. add-ons
+    min_usd: 50                       # skip buys where our size would be smaller
+    entry_delay_s: 15                 # our realistic latency: fill = Relay quote this long after detection
+    max_signal_age_s: 120             # don't enter trades detected later than this (e.g. startup poll)
+    max_open_positions: 10            # own limit, separate from the Solana risk limits
+    safety_stop: 0.60                 # sell everything at -60% vs the cost of what we still hold
+    mark_interval_s: 60               # Relay quote per open position (mark + stop check)
+    logs_poll_s: 15                   # eth_getLogs for Transfers out of his EVM address (DEX sells)
+    dex_confirm_s: 15                 # then check Relay: no request for that tx = DEX sell

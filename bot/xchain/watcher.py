@@ -25,8 +25,8 @@ from collections import OrderedDict
 
 import aiohttp
 
-from .relay import (CHAIN_NAMES, FINAL, SOLANA_CHAIN_ID, USDC_SOL, RelayClient, XTrade, memo_request_ids,
-                    parse_price, parse_request, relay_tx_kind)
+from .relay import (FINAL, RelayClient, XTrade, memo_request_ids, parse_price, parse_request, price_body,
+                    relay_tx_kind)
 
 log = logging.getLogger("xchain")
 
@@ -41,7 +41,10 @@ class XchainWatcher:
         self.resolve_timeout = float(cfg.get("resolve_timeout_s", 180))
         self.key = os.environ.get(cfg.get("api_key_env", "RELAY_API_KEY"), "")
         self.rpc = {name: os.environ.get(env, "") for name, env in (cfg.get("rpc_env") or {}).items()}
+        for name, url in (cfg.get("rpc_public") or {}).items():    # free fallback when no env var is set
+            self.rpc[name] = self.rpc.get(name) or url
         self.client = client
+        self.trader = None                                       # XchainPaperTrader, set by Bot if enabled
         self.session: aiohttp.ClientSession | None = None
         self._tasks: set[asyncio.Task] = set()
         self._resolving: set[str] = set()
@@ -65,7 +68,8 @@ class XchainWatcher:
             self.store.record_event(time.time(), leader, sig, f"xchain_{what}", "", None,
                                     f"{usdc / 1e6:.2f} USDC via Relay")
             log.info("xchain %s by %s: %.2f USDC (%s)", what, leader[:8], usdc / 1e6, sig[:16])
-            self._spawn(self._resolve(leader, sig, what, memo_request_ids(tx) if what == "payout" else []))
+            self._spawn(self._resolve(leader, sig, what, memo_request_ids(tx) if what == "payout" else [],
+                                      time.time()))
         except Exception as e:                                   # watch-only: never disturb the bot
             log.warning("xchain detection error for %s: %s", sig[:16], e)
 
@@ -74,7 +78,7 @@ class XchainWatcher:
         self._tasks.add(t)
         t.add_done_callback(self._tasks.discard)
 
-    async def _resolve(self, leader: str, sig: str, what: str, memo_ids: list[str]):
+    async def _resolve(self, leader: str, sig: str, what: str, memo_ids: list[str], detected_at: float):
         if sig in self._resolving:
             return
         self._resolving.add(sig)
@@ -90,7 +94,7 @@ class XchainWatcher:
                 done = [r for r in reqs or [] if r.get("status") in FINAL]
                 if done:
                     for r in done:
-                        self.record(leader, r, via="stream")
+                        self.record(leader, r, via="stream", detected_at=detected_at)
                     return
                 await asyncio.sleep(3)
             log.warning("xchain: Relay request for %s not final after %.0fs", sig[:16], self.resolve_timeout)
@@ -100,7 +104,7 @@ class XchainWatcher:
             self._resolving.discard(sig)
 
     # ---------- recording ----------
-    def record(self, leader: str, req: dict, via: str) -> XTrade | None:
+    def record(self, leader: str, req: dict, via: str, detected_at: float | None = None) -> XTrade | None:
         t = parse_request(req)
         if t is None:
             return None
@@ -111,6 +115,8 @@ class XchainWatcher:
                  f"{t.token_ui:,.4g}", t.symbol, t.usd, t.price_usd or 0, t.request_id[:12], via)
         if t.status == "success" and t.side in ("buy", "sell"):
             self._spawn(self._price_later(t, leader, evm))
+        if self.trader is not None:                              # phase 2 paper trading (optional)
+            self.trader.on_his_trade(t, leader, evm, detected_at or time.time())
         return t
 
     async def _price_later(self, t: XTrade, leader: str, evm: str):
@@ -119,15 +125,8 @@ class XchainWatcher:
         if time.time() - at > 60:            # found late (startup poll): a price now isn't "+15 s"
             return
         await asyncio.sleep(max(0.0, at - time.time()))
-        if t.side == "buy":
-            usdc = int(round(t.usd * 1e6))
-            body = {"user": leader, "recipient": evm, "originChainId": SOLANA_CHAIN_ID,
-                    "destinationChainId": t.chain_id, "originCurrency": USDC_SOL,
-                    "destinationCurrency": t.token, "amount": str(usdc), "tradeType": "EXACT_INPUT"}
-        else:
-            body = {"user": evm, "recipient": leader, "originChainId": t.chain_id,
-                    "destinationChainId": SOLANA_CHAIN_ID, "originCurrency": t.token,
-                    "destinationCurrency": USDC_SOL, "amount": str(t.token_amount), "tradeType": "EXACT_INPUT"}
+        amount = int(round(t.usd * 1e6)) if t.side == "buy" else t.token_amount
+        body = price_body(t.side, leader, evm, t.chain_id, t.token, amount)
         p = parse_price(await self.client.price(body) or {})
         if not p:
             self.store.set_xprice(t.request_id, time.time(), None, None, None)
@@ -151,7 +150,7 @@ class XchainWatcher:
                 reqs = await self.client.requests(user=user, startTimestamp=since, limit=50)
                 for r in reqs or []:
                     if r.get("status") in FINAL:
-                        self.record(leader, r, via="poll")
+                        self.record(leader, r, via="poll")   # detected now
 
     async def check_nonces(self):
         """His EVM nonce growth vs the Relay requests we saw from that chain since start."""
@@ -189,6 +188,8 @@ class XchainWatcher:
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         if self.client is None:
             self.client = RelayClient(self.session, self.key)
+        if self.trader is not None:
+            self._spawn(self.trader.run(self.client, self.session, self.rpc))
         chains = [c for c, u in self.rpc.items() if u]
         log.info("xchain watch-only for %d leader(s); Relay key %s; EVM nonce check on %s",
                  len(self.leaders), "set" if self.key else "MISSING", chains or "no chains (no RPC env vars)")

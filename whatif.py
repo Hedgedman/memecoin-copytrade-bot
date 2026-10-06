@@ -32,7 +32,7 @@ SLS = [0.05, 0.10, 0.15, 0.20, 0.30]
 
 def load(db_path: str, from_id: int):
     db = sqlite3.connect(db_path)
-    pos = db.execute("SELECT id, cost FROM positions WHERE paper=1 AND status='closed' AND id>=? "
+    pos = db.execute("SELECT id, cost FROM positions WHERE paper=1 AND chain='solana' AND status='closed' AND id>=? "
                      "ORDER BY id", (from_id,)).fetchall()
     out = []
     for pid, cost in pos:
@@ -91,7 +91,7 @@ def main():
         print(row)
 
     actual = sum(v for (v,) in sqlite3.connect(args.db).execute(
-        "SELECT exit_value - cost FROM positions WHERE paper=1 AND status='closed' AND id>=?", (args.from_id,)))
+        "SELECT exit_value - cost FROM positions WHERE paper=1 AND chain='solana' AND status='closed' AND id>=?", (args.from_id,)))
     print(f"\nActual result of these positions: {actual:+.2f} SOL")
     if best:
         print(f"Best cell with <=20% censored trades: TP +{int(best[1]*100)}% / SL -{int(best[2]*100)}% "
