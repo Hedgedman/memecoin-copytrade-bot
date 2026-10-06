@@ -225,6 +225,7 @@ class SolanaAdapter(ChainAdapter):
         self.max_roundtrip_loss = float(cfg.get("max_roundtrip_loss", 0.08))
         self.reject_freeze = bool(cfg.get("reject_freeze_authority", True))
         self.reject_mint_auth = bool(cfg.get("reject_mint_authority", True))
+        self.reject_hook = bool(cfg.get("reject_transfer_hook", True))
         self.confirm_timeout = float(cfg.get("confirm_timeout_s", 60))
         self.max_mc_usd = float(cfg.get("max_market_cap_usd", 0))      # 0 = no filter
         self.min_mc_usd = float(cfg.get("min_market_cap_usd", 0))      # 0 = no filter
@@ -860,6 +861,8 @@ class SolanaAdapter(ChainAdapter):
                 return False, "freeze authority set (your tokens can be frozen)"
             if self.reject_mint_auth and info.get("mintAuthority"):
                 return False, "mint authority set (supply can be inflated)"
+            if self.reject_hook and transfer_hook(info):
+                return False, f"transfer hook set (sells can be taxed/blocked): {transfer_hook(info)[:8]}"
             lamports = int(amount_native * LAMPORTS)
             supply = int(info.get("supply") or 0)
             if supply:
@@ -1022,6 +1025,20 @@ def leader_token_balance(tx: dict | None, wallet: str, mint: str, which: str = "
     lst = tx["meta"].get("preTokenBalances" if which == "pre" else "postTokenBalances") or []
     return sum(int(b["uiTokenAmount"]["amount"]) for b in lst
                if b.get("mint") == mint and b.get("owner") == wallet)
+
+
+def transfer_hook(mint_info: dict) -> str | None:
+    """Token-2022 transfer hook of a jsonParsed mint: the hook program id, "authority" if no
+    program is set yet but someone can set one, or None. Jupiter can't trade these, and the
+    hook runs on every transfer, so it can tax or block sells."""
+    for e in mint_info.get("extensions") or []:
+        if e.get("extension") == "transferHook":
+            st = e.get("state") or {}
+            if st.get("programId"):
+                return st["programId"]
+            if st.get("authority"):
+                return "authority"
+    return None
 
 
 def mentioned_leader(tx: dict | None, leaders: set) -> str | None:

@@ -1,0 +1,121 @@
+{
+ "hook": {
+  "mint": "ffw3qE9Vm5XvS3HKR3b38dey6qcezDok6NsF3X1w4qQ",
+  "account": {
+   "lamports": 3022600,
+   "data": {
+    "program": "spl-token-2022",
+    "parsed": {
+     "info": {
+      "decimals": 9,
+      "extensions": [
+       {
+        "extension": "metadataPointer",
+        "state": {
+         "authority": "2oXT6oMgNPfToahWG48QTBPWS9UJ8a7TSSeEoeoSLMGt",
+         "metadataAddress": "ffw3qE9Vm5XvS3HKR3b38dey6qcezDok6NsF3X1w4qQ"
+        }
+       },
+       {
+        "extension": "transferHook",
+        "state": {
+         "authority": "FhVo3mqL8PW5pH5U2CN4XE33DokiyZnUwuGpH2hmHLuM",
+         "programId": "9eQyvzp3hfghBhA4VUECLZzyZswmFGcne1rfs9QN3CnL"
+        }
+       },
+       {
+        "extension": "tokenMetadata",
+        "state": {
+         "additionalMetadata": [],
+         "mint": "ffw3qE9Vm5XvS3HKR3b38dey6qcezDok6NsF3X1w4qQ",
+         "name": "PLAGUE",
+         "symbol": "PLAGUE",
+         "updateAuthority": "2oXT6oMgNPfToahWG48QTBPWS9UJ8a7TSSeEoeoSLMGt",
+         "uri": "https://gateway.irys.xyz/5kNErBrNGZWa2bYjNZvf6i9jTwt1EvWXUbGzLz3bJL3g"
+        }
+       }
+      ],
+      "freezeAuthority": null,
+      "isInitialized": true,
+      "mintAuthority": null,
+      "supply": "999999999000000000"
+     },
+     "type": "mint"
+    },
+    "space": 467
+   },
+   "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "executable": false,
+   "rentEpoch": 18446744073709551615,
+   "space": 467
+  }
+ },
+ "t22_plain": {
+  "mint": "8A4MBFrfobzhJMjt6qykGxhFEMWt4BHtEGrjVPrru3zm",
+  "account": {
+   "lamports": 2870200,
+   "data": {
+    "program": "spl-token-2022",
+    "parsed": {
+     "info": {
+      "decimals": 6,
+      "extensions": [
+       {
+        "extension": "metadataPointer",
+        "state": {
+         "authority": null,
+         "metadataAddress": "8A4MBFrfobzhJMjt6qykGxhFEMWt4BHtEGrjVPrru3zm"
+        }
+       },
+       {
+        "extension": "tokenMetadata",
+        "state": {
+         "additionalMetadata": [],
+         "mint": "8A4MBFrfobzhJMjt6qykGxhFEMWt4BHtEGrjVPrru3zm",
+         "name": "Binder",
+         "symbol": "BINDER",
+         "updateAuthority": null,
+         "uri": "https://www.agencypad.fun/media/8A4MBFrfobzhJMjt6qykGxhFEMWt4BHtEGrjVPrru3zm/metadata-7ef2ea7a58e6920b.json"
+        }
+       }
+      ],
+      "freezeAuthority": null,
+      "isInitialized": true,
+      "mintAuthority": null,
+      "supply": "939862671620911"
+     },
+     "type": "mint"
+    },
+    "space": 437
+   },
+   "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+   "executable": false,
+   "rentEpoch": 18446744073709551615,
+   "space": 437
+  }
+ },
+ "spl": {
+  "mint": "3zJTi76baQ7oWjyuNyz9nhuQi2aXMAFsH5PEJkzgyH2N",
+  "account": {
+   "lamports": 1066800,
+   "data": {
+    "program": "spl-token",
+    "parsed": {
+     "info": {
+      "decimals": 6,
+      "freezeAuthority": null,
+      "isInitialized": true,
+      "mintAuthority": null,
+      "supply": "19779651430241"
+     },
+     "type": "mint"
+    },
+    "space": 82
+   },
+   "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+   "executable": false,
+   "rentEpoch": 18446744073709551615,
+   "space": 82
+  }
+ }
+}

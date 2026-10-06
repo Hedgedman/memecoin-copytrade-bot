@@ -24,6 +24,7 @@ chains:
     max_roundtrip_loss: 0.08 # skip if buy->sell quote loses more than 8%
     reject_freeze_authority: true
     reject_mint_authority: true
+    reject_transfer_hook: true   # Token-2022 transfer hook: can tax/block sells; Jupiter refuses these anyway
     confirm_timeout_s: 60
     daily_loss_limit: 5      # SOL; no new buys after this realized loss today
     # --- pool pricing (no Jupiter calls for checks, marks, stops and paper fills) ---
