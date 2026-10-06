@@ -6,11 +6,15 @@ Usage (from the copybot folder):
     python whatif_ticks.py --from-id 44 --sl 0.15    # safety stop used by trailing/partial styles
     python whatif_ticks.py --from-id 44 --max-mc 500000              # only entries below $500k market cap
     python whatif_ticks.py --from-id 44 --min-mc 500000              # only entries at/above $500k
+    python whatif_ticksv2.py --live --leader-sl 0.4                  # leader-exit style, -40% safety stop
 
 Exit styles compared
   fixed     sell everything at +TP, or at the stop                (what the bot does now)
   trailing  once up +A%, sell everything when value falls X% from its peak; stop before that
   partial   sell part at +TP1, the rest with a trailing stop X% from the peak; stop before TP1
+  leader    sell everything when the copied leader sells (his first sell of that token after our
+            entry, at the time the bot saw it); optional wide safety stop (--leader-sl), optionally
+            combined with the trailing stop. No leader sell in the data = censored.
 
 How it works
 - Prices come from the `ticks` table (every pool change), valued with exact pool math for
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import sqlite3
 from dataclasses import dataclass
 
@@ -41,6 +46,7 @@ TRAIL_PCTS = [0.10, 0.20, 0.30, 0.40]
 PART_TP1 = [0.20, 0.30, 0.50, 1.00]
 PART_TRAIL = [0.15, 0.25, 0.40]
 PEAK_LEVELS = [0.30, 0.50, 1.00, 2.00, 4.00]
+LEADER_SLS = [0.0, 0.20, 0.30, 0.40, 0.60]                     # 0 = no safety stop
 
 
 @dataclass
@@ -51,6 +57,7 @@ class Pos:
     entry_net: int       # lamports that entered the pool from our buy (after pool fee)
     series: list         # [(ts, PoolState, fee_bps, factor)]  factor = real value / pool-model value
     factor: float = 1.0  # kept for compatibility
+    leader_exit: float | None = None   # when the bot saw the leader's first sell after our entry
 
 
 def shifted(st: PoolState, net_in: int) -> PoolState:
@@ -87,8 +94,18 @@ def entry_mc(db, token, leader, opened):
         return None
 
 
+def leader_exit_ts(db, token, leader, opened):
+    """First 'sell' signal of this leader for this token after our entry (bot detection time).
+    The bot logs every leader sell, also after our position closed."""
+    r = db.execute("SELECT MIN(ts) FROM signals WHERE token=? AND leader=? AND side='sell' AND ts>?",
+                   (token, leader, opened)).fetchone()
+    return r[0] if r else None
+
+
 def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False):
-    db = sqlite3.connect(db_path)
+    # read-only, so it is safe to point --db at the live bot's database while it runs
+    db = sqlite3.connect(db_path if db_path.startswith("file:") else
+                         f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
     rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader FROM positions WHERE paper=? AND "
                       "status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
     out, skipped, mc_out = [], 0, 0
@@ -136,11 +153,13 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
                     if model > 0:
                         factor = m[1] / model
                 series = [(ts, st, fee, factor) for ts, st, fee, _ in series]
-            out.append(Pos(pid, cost, int(amount), 0, series))
+            out.append(Pos(pid, cost, int(amount), 0, series,
+                           leader_exit=leader_exit_ts(db, token, leader, opened)))
             continue
         fee0 = series[0][2]
         entry = int((cost - paper_fee) * L)
-        out.append(Pos(pid, cost, int(amount), entry * (10_000 - fee0) // 10_000, series))
+        out.append(Pos(pid, cost, int(amount), entry * (10_000 - fee0) // 10_000, series,
+                       leader_exit=leader_exit_ts(db, token, leader, opened)))
     return out, skipped, mc_out
 
 
@@ -148,6 +167,8 @@ def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee:
         stop_basis: str, part: float, confirm: float = 0.0, hard: float = 0.0) -> tuple[float, bool]:
     """Simulate one position. Returns (final SOL value after fees, censored).
     fixed: a=TP, b unused | trailing: a=activation, b=trail | partial: a=TP1, b=trail.
+    leader: sell all at p.leader_exit; sl 0 = no safety stop; b > 0 adds a trailing stop
+    (a=activation, b=trail) that can exit before the leader does.
     confirm: protective exits (stop / trailing) only fire if the condition holds for
     `confirm` seconds; hard: a stop at -hard from the reference fires immediately anyway."""
     s = p.series
@@ -181,6 +202,14 @@ def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee:
                         action, protective = "all", True
                 elif stop_ret <= -sl:
                     action, protective = "all", True
+            elif style == "leader":
+                if p.leader_exit is not None and ts >= p.leader_exit:
+                    action = "all"
+                elif b > 0 and peak / p.cost - 1 >= a:
+                    if total <= peak * (1 - b):
+                        action, protective = "all", True
+                elif sl > 0 and stop_ret <= -sl:
+                    action, protective = "all", True
             else:  # partial
                 if not partial_done:
                     if ret >= a:
@@ -198,6 +227,8 @@ def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee:
                 since = None
             if action is not None:
                 trigger_ts = ts
+                if style == "leader" and not protective and p.leader_exit is not None:
+                    trigger_ts = max(p.leader_exit, s[0][0])   # his sell, not the next tick after it
         if action is None:
             i += 1
             continue
@@ -272,6 +303,8 @@ def main():
     ap.add_argument("--hard", type=float, default=0.25, help="hard stop from the reference that never waits")
     ap.add_argument("--min-mc", type=float, default=None, help="only positions entered at >= this market cap (USD)")
     ap.add_argument("--max-mc", type=float, default=None, help="only positions entered below this market cap (USD)")
+    ap.add_argument("--leader-sl", type=float, default=None,
+                    help="extra safety-stop row for the leader-exit style, e.g. 0.4 (rows always include off/20/30/40/60%%)")
     args = ap.parse_args()
     try:
         cfg = yaml.safe_load(open(args.config))
@@ -340,6 +373,23 @@ def main():
     for (b, a), (r, rl, cl) in pa.items():
         allres.append((r, f"partial {int(args.part*100)}% at {cl}, rest {rl} (SL -{int(sl*100)}%)",
                        ("partial", a, b, sl)))
+
+    t_act, t_pct = float(ex.get("trailing_activate", 0.5) or 0.5), float(ex.get("trailing_pct", 0.3) or 0.3)
+    has = [p for p in data if p.leader_exit is not None and p.leader_exit <= p.series[-1][0]]
+    waits = sorted(p.leader_exit - p.series[0][0] for p in has)
+    print(f"\nLeader exits: {len(has)}/{n} positions have the leader's first sell inside the recorded data"
+          + (f" (median {waits[len(waits) // 2] / 60:.1f} min after our entry)" if waits else "")
+          + f"; the other {n - len(has)} are censored unless a stop fires")
+    lsls = sorted(set(LEADER_SLS) | ({args.leader_sl} if args.leader_sl is not None else set()))
+    le = table(f"LEADER EXIT: sell when the leader sells   rows = safety stop ({basis}), "
+               f"cols = leader exit only / + trailing {int(t_pct*100)}% after {pct(t_act)}",
+               [("no stop" if x == 0 else f"-{int(round(x*100))}%", x) for x in lsls],
+               [("leader only", (0.0, 0.0)), (f"+trail {pct(t_act)}", (t_act, t_pct))],
+               lambda s_, ab: score(data, "leader", ab[0], ab[1], s_, delay, fee, basis, args.part,
+                                    args.confirm, args.hard), n)
+    for (s_, ab), (r, rl, cl) in le.items():
+        allres.append((r, f"leader exit{'' if ab[1] == 0 else f' + trailing {int(ab[1]*100)}% after {pct(ab[0])}'}"
+                          f" ({'no stop' if s_ == 0 else f'SL -{int(round(s_*100))}%'})", ("leader", ab[0], ab[1], s_)))
 
     max_c = math.ceil(n * 0.2)
     ok = [x for x in allres if x[0][2] <= max_c]
