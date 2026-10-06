@@ -45,10 +45,19 @@ class Store:
             his_price_usd REAL, our_usd REAL, our_tokens TEXT, our_price_usd REAL, gap_pct REAL,
             delay_s REAL, impact_pct REAL, gas_usd REAL);
         CREATE INDEX IF NOT EXISTS xchain_fills_pos ON xchain_fills(position_id, ts);
+        CREATE TABLE IF NOT EXISTS xchain_addresses(
+            leader TEXT, evm_address TEXT, first_seen REAL, last_seen REAL, source TEXT,
+            PRIMARY KEY(leader, evm_address));
+        CREATE TABLE IF NOT EXISTS xchain_prices(
+            request_id TEXT, offset_s REAL, ts REAL, delay_s REAL, price_usd REAL, gap_pct REAL,
+            impact_pct REAL, out_usd REAL);
+        CREATE INDEX IF NOT EXISTS xchain_prices_req ON xchain_prices(request_id);
         """)
         self.db.commit()
         for table, col, typ in (("signals", "venues", "TEXT"), ("positions", "ref_value", "REAL"),
-                               ("positions", "timing", "TEXT")):
+                               ("positions", "timing", "TEXT"), ("xchain_trades", "detected_at", "REAL"),
+                               ("xchain_trades", "detect_delay_s", "REAL"), ("xchain_fills", "leader", "TEXT"),
+                               ("xchain_fills", "detect_delay_s", "REAL")):
             try:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             except sqlite3.OperationalError:
@@ -91,16 +100,19 @@ class Store:
         self.db.execute("INSERT INTO leader_events VALUES(?,?,?,?,?,?,?)", (ts, leader, sig, kind, token, sol, detail))
         self.db.commit()
 
-    def record_xtrade(self, t, leader: str, evm: str, via: str) -> bool:
+    def record_xtrade(self, t, leader: str, evm: str, via: str, detected_at: float | None = None) -> bool:
         """A leader's cross-chain trade (bot/xchain). False if this Relay request is already stored.
+        detect_delay_s = when we learned of it - his deposit tx (buy: Solana, sell: EVM chain).
         Also logged in `signals` (quote_amount = USD, not SOL) so why.py & co. see it."""
+        detected_at = detected_at or time.time()
+        delay = detected_at - t.deposit_ts if t.deposit_ts else None
         cur = self.db.execute(
             "INSERT OR IGNORE INTO xchain_trades(request_id,ts,leader,evm_address,side,chain,chain_id,token,"
             "symbol,decimals,token_amount,usd,his_price_usd,status,deposit_tx,deposit_ts,fill_tx,fill_ts,"
-            "detected_via,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "detected_via,raw,detected_at,detect_delay_s) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (t.request_id, time.time(), leader, evm, t.side, t.chain, t.chain_id, t.token, t.symbol,
              t.decimals, str(t.token_amount), t.usd, t.price_usd, t.status, t.deposit_tx, t.deposit_ts,
-             t.fill_tx, t.fill_ts, via, json.dumps(t.raw)))
+             t.fill_tx, t.fill_ts, via, json.dumps(t.raw), detected_at, delay))
         if cur.rowcount == 0:
             return False
         sig = t.deposit_tx if t.side == "buy" else (t.fill_tx or t.request_id)
@@ -118,6 +130,32 @@ class Store:
         self.db.execute("UPDATE xchain_trades SET price_later_ts=?, price_later_usd=?, price_later_impact_pct=?,"
                         " price_later_out_usd=? WHERE request_id=?", (ts, price, impact, out_usd, request_id))
         self.db.commit()
+
+    def record_xprice(self, request_id: str, offset_s: float, ts: float, delay_s, price, gap, impact, out_usd):
+        """One step of the price ladder: Relay /price for his size, offset_s after we detected his trade."""
+        self.db.execute("INSERT INTO xchain_prices VALUES(?,?,?,?,?,?,?,?)",
+                        (request_id, offset_s, ts, delay_s, price, gap, impact, out_usd))
+        self.db.commit()
+
+    def upsert_xaddress(self, leader: str, evm: str, ts: float, source: str) -> bool:
+        """A leader's EVM address (lowercase). True if it is new."""
+        new = self.db.execute("INSERT OR IGNORE INTO xchain_addresses VALUES(?,?,?,?,?)",
+                              (leader, evm.lower(), ts, ts, source)).rowcount > 0
+        if not new:
+            self.db.execute("UPDATE xchain_addresses SET last_seen=MAX(last_seen, ?) WHERE leader=? AND evm_address=?",
+                            (ts, leader, evm.lower()))
+        self.db.commit()
+        return new
+
+    def xaddresses(self) -> dict[str, set[str]]:
+        out: dict[str, set[str]] = {}
+        for leader, evm in self.db.execute("SELECT leader, evm_address FROM xchain_addresses"):
+            out.setdefault(leader, set()).add(evm)
+        return out
+
+    def xtrade_last_ts(self) -> dict[str, float]:
+        """Per leader: time of his latest recorded cross-chain trade (decides the poll tier)."""
+        return dict(self.db.execute("SELECT leader, MAX(COALESCE(deposit_ts, ts)) FROM xchain_trades GROUP BY leader"))
 
     def xtrade_count_from(self, evm: str, chain: str, since: float) -> int:
         """Relay requests that started on `chain` from `evm` (his sells / bridges there) since `since`."""
@@ -139,7 +177,7 @@ class Store:
         """One paper fill of an xchain position: his trade vs our Relay quote (bot/xchain/paper.py)."""
         cols = ("ts", "position_id", "chain", "token", "symbol", "side", "reason", "fraction", "his_ref",
                 "his_ts", "his_usd", "his_price_usd", "our_usd", "our_tokens", "our_price_usd", "gap_pct",
-                "delay_s", "impact_pct", "gas_usd")
+                "delay_s", "impact_pct", "gas_usd", "leader", "detect_delay_s")
         cur = self.db.execute(f"INSERT INTO xchain_fills({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
                               tuple(str(f[c]) if c == "our_tokens" else f.get(c) for c in cols))
         self.db.commit()

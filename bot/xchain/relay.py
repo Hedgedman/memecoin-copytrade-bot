@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import aiohttp
@@ -23,7 +24,8 @@ RELAY_DEPOSITORY = "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2"
 RELAY_SOLVER = "F7p3dFrjRTbtRp8FRF6qHLomXbKRBzpvBLjtQcfcgmNe"
 SOLANA_CHAIN_ID = 792703809                      # Relay's id for Solana
 USDC_SOL = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-CHAIN_NAMES = {SOLANA_CHAIN_ID: "solana", 4663: "robinhood", 56: "bsc", 1: "ethereum", 8453: "base"}
+CHAIN_NAMES = {SOLANA_CHAIN_ID: "solana", 4663: "robinhood", 56: "bsc", 1: "ethereum", 8453: "base",
+               143: "monad", 999: "hyperevm", 5042: "arc"}     # names as in Relay GET /chains
 FINAL = ("success", "refund", "failure")
 # Moving these between chains is cash management, not a token trade (live v3: after selling a token
 # on an EVM DEX he bridges the WETH/WBNB/USDC back to Solana) -> side "bridge".
@@ -190,14 +192,61 @@ def parse_quote(resp: dict) -> Quote | None:
     return q if q.out_raw > 0 else None
 
 
+class RateLimiter:
+    """One budget for every Relay call (sliding window of window_s). Lower priorities only get part of
+    it, so our fills never queue behind background polls:
+        0 = our paper fills/quotes   1 = resolving his trades, hot polls   2 = marks, warm polls   3 = background
+    On a 429: everything pauses pause_s, then runs at half budget for slow_s."""
+    SHARE = (1.0, 0.9, 0.7, 0.5)
+
+    def __init__(self, per_window: int = 100, window_s: float = 60.0, pause_s: float = 30.0, slow_s: float = 300.0):
+        self.per_window, self.window, self.pause_s, self.slow_s = per_window, window_s, pause_s, slow_s
+        self.calls: deque[float] = deque()
+        self.pause_until = self.slow_until = 0.0
+        self.total = self.limited = 0
+
+    def _prune(self, now: float):
+        while self.calls and now - self.calls[0] >= self.window:
+            self.calls.popleft()
+
+    def used(self) -> int:
+        self._prune(time.monotonic())
+        return len(self.calls)
+
+    def budget(self, now: float) -> float:
+        return self.per_window * (0.5 if now < self.slow_until else 1.0)
+
+    async def acquire(self, priority: int = 1):
+        share = self.SHARE[max(0, min(priority, len(self.SHARE) - 1))]
+        while True:
+            now = time.monotonic()
+            self._prune(now)
+            if now >= self.pause_until and len(self.calls) < self.budget(now) * share:
+                self.calls.append(now)
+                self.total += 1
+                return
+            if now < self.pause_until:
+                wait = self.pause_until - now
+            else:
+                wait = self.window - (now - self.calls[0]) if self.calls else 0.05
+            await asyncio.sleep(min(max(wait, 0.05), 5.0))
+
+    def hit_429(self):
+        now = time.monotonic()
+        self.limited += 1
+        self.pause_until = now + self.pause_s
+        self.slow_until = self.pause_until + self.slow_s
+
+
 class RelayClient:
     """GET /requests/v3 (needs an API key) and POST /price. Never raises on HTTP errors:
-    returns None and logs, so the bot keeps running."""
+    returns None and logs, so the bot keeps running. Every call goes through one RateLimiter."""
 
-    def __init__(self, session: aiohttp.ClientSession, api_key: str, base: str = API):
+    def __init__(self, session: aiohttp.ClientSession, api_key: str, base: str = API,
+                 limiter: RateLimiter | None = None):
         self.session, self.key, self.base = session, api_key, base.rstrip("/")
+        self.limiter = limiter or RateLimiter()
         self._warned = False
-        self._pause_until = 0.0
 
     @property
     def has_key(self) -> bool:
@@ -206,23 +255,28 @@ class RelayClient:
     def _headers(self):
         return {"x-api-key": self.key} if self.key else {}
 
-    async def _wait(self):
-        if self._pause_until > time.time():
-            await asyncio.sleep(self._pause_until - time.time())
+    def _limited(self, what: str):
+        self.limiter.hit_429()
+        log.warning("Relay rate limit (429) on %s - pausing %.0f s, then half rate for %.0f s",
+                    what, self.limiter.pause_s, self.limiter.slow_s)
 
-    async def requests(self, **params) -> list[dict] | None:
+    async def requests(self, priority: int = 1, **params) -> list[dict] | None:
+        page = await self.requests_page(priority, **params)
+        return None if page is None else page[0]
+
+    async def requests_page(self, priority: int = 1, **params) -> tuple[list[dict], str | None] | None:
+        """One page of GET /requests/v3 -> (requests, continuation token or None)."""
         if not self.key:
             if not self._warned:
                 log.warning("RELAY_API_KEY is not set: cross-chain trades are detected and logged as "
                             "leader_events, but NOT resolved (token/amounts/prices). Set the key and restart.")
                 self._warned = True
             return None
-        await self._wait()
+        await self.limiter.acquire(priority)
         try:
             async with self.session.get(f"{self.base}/requests/v3", params=params, headers=self._headers()) as r:
                 if r.status == 429:
-                    self._pause_until = time.time() + 10
-                    log.warning("Relay rate limit (429) - pausing 10 s")
+                    self._limited("/requests/v3")
                     return None
                 j = await r.json(content_type=None)
                 if r.status != 200:
@@ -231,14 +285,14 @@ class RelayClient:
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
             log.warning("Relay /requests/v3 failed: %s", type(e).__name__)
             return None
-        return j.get("requests") or []
+        return j.get("requests") or [], j.get("continuation") or None
 
-    async def price(self, body: dict) -> dict | None:
-        await self._wait()
+    async def price(self, body: dict, priority: int = 1) -> dict | None:
+        await self.limiter.acquire(priority)
         try:
             async with self.session.post(f"{self.base}/price", json=body, headers=self._headers()) as r:
                 if r.status == 429:
-                    self._pause_until = time.time() + 10
+                    self._limited("/price")
                     return None
                 j = await r.json(content_type=None)
                 if r.status != 200:

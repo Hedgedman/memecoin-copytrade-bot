@@ -1,6 +1,9 @@
 """What-if for cross-chain PAPER positions (robinhood / bsc), on the bot's own data. Read-only.
 
-    python whatif_xchain.py [--db copybot.db] [--from-id N] [--list]
+    python whatif_xchain.py [--db copybot.db] [--from-id N] [--leader PREFIX] [--chain bsc] [--list]
+
+Per leader (always shown): positions, actual PnL, mirror/-60% replay, entry gap (our fill vs his price),
+and how late we saw (seen) and mirrored (filled) his sells, from xchain_fills.
 
 Unlike whatif_ticksv2.py (Solana, every pool update) these positions only have a Relay quote per
 mark (~60 s) and per fill, so stops are checked at mark resolution and filled at the mark's price.
@@ -20,11 +23,12 @@ STOPS = (None, 0.40, 0.50, 0.60, 0.70)
 STYLES = ("mirror", "first_sell", "hold")
 
 
-def load(db, from_id):
+def load(db, from_id, leader="", chain=""):
     out = []
-    for pid, chain, cost, exitv, status, timing in db.execute(
-            "SELECT id, chain, cost, exit_value, status, timing FROM positions WHERE paper=1 AND chain!='solana' "
-            "AND id>=? ORDER BY id", (from_id,)):
+    for pid, chain, cost, exitv, status, timing, who in db.execute(
+            "SELECT id, chain, cost, exit_value, status, timing, leader FROM positions WHERE paper=1 "
+            "AND chain!='solana' AND id>=? AND leader LIKE ? AND chain LIKE ? ORDER BY id",
+            (from_id, leader + "%", chain or "%")):
         rows = db.execute("SELECT ts, side, fraction, our_usd, our_tokens, reason FROM xchain_fills "
                           "WHERE position_id=? ORDER BY ts", (pid,)).fetchall()
         if not rows:
@@ -45,8 +49,38 @@ def load(db, from_id):
             if remaining > 0:
                 ev.append((ts, "mark", None, None, (value - realized) / remaining, None))
         ev.sort(key=lambda e: (e[0], e[1] != "fill"))
-        out.append((pid, chain, cost, exitv, status, ev))
+        out.append((pid, chain, cost, exitv, status, ev, who))
     return out
+
+
+def avg(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else None
+
+
+def fmt(x, spec, unit=""):
+    return "-" if x is None else f"{x:{spec}}{unit}"
+
+
+def by_leader(db, data):
+    print(f"{'leader':<9} {'pos':>4} {'closed':>6} {'actual $':>10} {'mirror-60 $':>12} {'wins':>7} "
+          f"{'entry gap':>9} {'sell gap':>8} {'sell seen':>9} {'sell filled':>11}")
+    cols = {r[1] for r in db.execute("PRAGMA table_info(xchain_fills)")}
+    leaders = sorted({d[6] for d in data}, key=lambda l: -sum(1 for d in data if d[6] == l))
+    for who in leaders:
+        rows = [d for d in data if d[6] == who]
+        ids = tuple(d[0] for d in rows)
+        seen = "detect_delay_s" if "detect_delay_s" in cols else "NULL"          # older DB: column not there yet
+        q = f"SELECT side, gap_pct, {seen}, delay_s FROM xchain_fills WHERE position_id IN ({','.join('?' * len(ids))})"
+        fills = db.execute(q, ids).fetchall()
+        sells = [f for f in fills if f[0] == "sell"]
+        res = [simulate(d[5], "mirror", 0.60) for d in rows]
+        actual = sum(e - c for _, _, c, e, s, _, _ in rows if s == "closed")
+        print(f"{who[:8]:<9} {len(rows):>4} {sum(d[4] == 'closed' for d in rows):>6} {actual:>+10,.0f} "
+              f"{sum(r[0] for r in res):>+12,.0f} {sum(r[0] > 0 for r in res):>3}/{len(res):<3} "
+              f"{fmt(avg([f[1] for f in fills if f[0] == 'buy']), '+.1f', '%'):>9} "
+              f"{fmt(avg([f[1] for f in sells]), '+.1f', '%'):>8} {fmt(avg([f[2] for f in sells]), '.0f', 's'):>9} "
+              f"{fmt(avg([f[3] for f in sells]), '.0f', 's'):>11}")
 
 
 def simulate(ev, style, stop):
@@ -81,30 +115,34 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", default="copybot.db")
     ap.add_argument("--from-id", type=int, default=0)
+    ap.add_argument("--leader", default="", help="only this leader (wallet prefix)")
+    ap.add_argument("--chain", default="", help="only this chain (robinhood / bsc)")
     ap.add_argument("--list", action="store_true", help="one line per position (mirror, -60%%)")
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{os.path.abspath(os.path.expanduser(args.db))}?mode=ro", uri=True)
-    data = load(db, args.from_id)
+    data = load(db, args.from_id, args.leader, args.chain)
     if not data:
         print("no xchain paper positions with fills yet")
         return
-    actual = sum(e - c for _, _, c, e, s, _ in data if s == "closed")
-    n_closed = sum(s == "closed" for *_, s, _ in data)
+    actual = sum(e - c for _, _, c, e, s, _, _ in data if s == "closed")
+    n_closed = sum(d[4] == "closed" for d in data)
     print(f"{len(data)} xchain paper positions ({n_closed} closed, actual closed PnL ${actual:+,.2f})")
     print("cells: PnL USD  wins/n  c = censored (still holding when the data ended)\n")
     print(f"{'style':<11}" + "".join(f"{'stop ' + (f'-{s:.0%}' if s else 'none'):>24}" for s in STOPS))
     for style in STYLES:
         cells = []
         for stop in STOPS:
-            res = [simulate(ev, style, stop) for *_, ev in data]
+            res = [simulate(d[5], style, stop) for d in data]
             pnl, wins, cens = sum(r[0] for r in res), sum(r[0] > 0 for r in res), sum(r[1] for r in res)
             cells.append(f"{pnl:+10,.0f} {wins:>3}/{len(res):<3} c{cens:<3}")
         print(f"{style:<11}" + "".join(f"{c:>24}" for c in cells))
+    print()
+    by_leader(db, data)
     if args.list:
         print()
-        for pid, chain, cost, exitv, status, ev in data:
+        for pid, chain, cost, exitv, status, ev, who in data:
             pnl, c = simulate(ev, "mirror", 0.60)
-            print(f"  #{pid:<5} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
+            print(f"  #{pid:<5} {who[:8]:<9} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
                   f"{'' if exitv is None else f'${exitv - cost:+,.2f}':>10}  sim ${pnl:+,.2f}{' (c)' if c else ''}")
 
 

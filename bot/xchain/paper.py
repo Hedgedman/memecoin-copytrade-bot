@@ -1,9 +1,11 @@
-"""Cross-chain PAPER trading (phase 2): mirror a leader's EVM trades with simulated fills. Never trades.
+"""Cross-chain PAPER trading: mirror the leaders' EVM trades with simulated fills. Never trades.
 
 There is no execution code here: every "fill" is a Relay POST /price quote for OUR size.
+One position per (chain, token, leader): each leader's trades are mirrored separately.
 
 Entries   his Relay buy (watcher.record) -> our size = size_mult x his USD, capped at
-          max_usd_per_token per token (add-ons included), skipped under min_usd. Filled on a quote
+          max_usd_per_token per token (add-ons included, summed over all leaders holding it),
+          skipped under min_usd. Limits: max_open_positions in total, max_open_per_leader. Filled on a quote
           taken entry_delay_s after we detected his trade (our realistic latency), Relay fees included
           (currencyOut is net of relayer fees; origin gas is added to our cost).
 Exits     he sells X% of his holding -> we sell X% of ours, quoted token -> Solana USDC.
@@ -17,6 +19,8 @@ Storage   positions (chain robinhood/bsc, paper=1, cost/exit_value in USD), mark
           quote for the remaining tokens (comparable with cost), xchain_fills = one row per fill.
           Position.timing holds the running state: remaining, realized_usd, basis_usd, bought_usd,
           his_bought/his_sold, evm, symbol, decimals, chain_id.
+          xchain_fills also hold leader + detect_delay_s (how late we saw his trade).
+EVM RPC   per chain: the configured URL (env, e.g. Alchemy), the public URL as fallback.
 """
 from __future__ import annotations
 
@@ -36,31 +40,34 @@ pad_addr = lambda a: "0x" + "0" * 24 + a.lower()[2:]
 
 
 class XchainPaperTrader:
-    def __init__(self, cfg: dict, store, paper: bool, leaders: dict[str, str], kill_switch_file: str = "STOP"):
+    def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP"):
         if not paper:
             raise ValueError("xchain trading is paper-only (no execution exists): set paper: true")
         self.store = store
-        self.leaders = {k: v.lower() for k, v in leaders.items()}           # solana wallet -> evm address
+        self.leaders = set(leaders)                                          # Solana leader wallets
         self.chains = set(cfg.get("chains", ["robinhood", "bsc"]))
         self.mult = float(cfg.get("size_mult", 0.4))
         self.cap = float(cfg.get("max_usd_per_token", 2000))
         self.min_usd = float(cfg.get("min_usd", 50))
         self.delay = float(cfg.get("entry_delay_s", 15))
         self.max_age = float(cfg.get("max_signal_age_s", 120))
-        self.max_open = int(cfg.get("max_open_positions", 10))
+        self.max_open = int(cfg.get("max_open_positions", 50))
+        self.max_per_leader = int(cfg.get("max_open_per_leader", 5))
         self.stop = float(cfg.get("safety_stop", 0.60))
-        self.mark_s = float(cfg.get("mark_interval_s", 60))
+        self.mark_s = float(cfg.get("mark_interval_s", 120))
         self.logs_s = float(cfg.get("logs_poll_s", 15))
         self.dex_confirm_s = float(cfg.get("dex_confirm_s", 15))
         self.max_span = int(cfg.get("max_log_span", 5000))
         self.sell_retries = int(cfg.get("sell_retries", 3))
         self.kill = kill_switch_file
-        self.positions: dict[tuple[str, str], Position] = {
-            (p.chain, p.token): p for p in store.load_open(True, self.chains) if p.timing.get("xchain")}
-        self.locks: dict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._opening: set[tuple[str, str]] = set()
+        self.positions: dict[tuple[str, str, str], Position] = {          # (chain, token, leader)
+            (p.chain, p.token, p.leader): p for p in store.load_open(True, self.chains) if p.timing.get("xchain")}
+        self.locks: dict[tuple[str, str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._opening: set[tuple[str, str, str]] = set()
+        self._reserved: dict[tuple[str, str], float] = defaultdict(float)  # (chain, token) -> USD being bought now
         self.client = self.session = None
         self.rpc: dict[str, str] = {}
+        self.rpc_fallback: dict[str, str] = {}
         self._tasks: set[asyncio.Task] = set()
         self._last_block: dict[str, int] = {}
         self._seen_logs: OrderedDict[str, None] = OrderedDict()
@@ -71,11 +78,18 @@ class XchainPaperTrader:
         """Called by the watcher for every NEW Relay request it records. Cheap; never raises."""
         if t.chain not in self.chains or t.status != "success" or leader not in self.leaders:
             return
+        evm = evm.lower()
         if t.side == "buy":
             self._spawn(self._buy(t, leader, evm, detected_at))
         elif t.side == "sell":
-            his = {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd, "his_price_usd": t.price_usd}
-            self._spawn(self._mirror_sell(t.chain, t.token, evm, t.token_amount, detected_at, "leader_sold", his))
+            his = {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd, "his_price_usd": t.price_usd,
+                   "detected_at": detected_at}
+            self._spawn(self._mirror_sell(t.chain, t.token, leader, evm, t.token_amount, detected_at,
+                                          "leader_sold", his))
+
+    def hot_leaders(self) -> set[str]:
+        """Leaders we hold an open paper position of (their sells are polled fastest)."""
+        return {k[2] for k in self.positions} | {k[2] for k in self._opening}
 
     def _spawn(self, coro):
         task = asyncio.ensure_future(self._guard(coro))
@@ -93,14 +107,19 @@ class XchainPaperTrader:
 
     # ---------- entries ----------
     async def _buy(self, t: XTrade, leader: str, evm: str, detected_at: float):
-        key = (t.chain, t.token)
+        key = (t.chain, t.token, leader)
         async with self.locks[key]:
             p = self.positions.get(key)
             if p is not None:                                    # his holding, for the no-RPC fallback
                 p.timing["his_bought"] = str(int(p.timing.get("his_bought", "0")) + t.token_amount)
             age = detected_at - (t.deposit_ts or detected_at)
             target = self.mult * t.usd
-            size = min(target, self.cap - (p.timing["bought_usd"] if p else 0.0))
+            tkey = (t.chain, t.token.lower())
+            in_token = self._reserved[tkey] + sum(              # all leaders together, incl. buys in flight
+                q.timing["bought_usd"] for (c, tk, _), q in self.positions.items()
+                if c == t.chain and tk.lower() == tkey[1])
+            size = min(target, self.cap - in_token)
+            n_leader = sum(k[2] == leader for k in list(self.positions) + list(self._opening))
             why = None
             if age > self.max_age:
                 why = f"stale: detected {age:.0f}s after his trade"
@@ -108,6 +127,8 @@ class XchainPaperTrader:
                 why = "kill switch file present"
             elif p is None and len(self.positions) + len(self._opening) >= self.max_open:
                 why = f"max open xchain positions ({self.max_open})"
+            elif p is None and n_leader >= self.max_per_leader:
+                why = f"max open xchain positions per leader ({self.max_per_leader})"
             elif size < self.min_usd:
                 why = (f"cap ${self.cap:,.0f}/token reached" if target >= self.min_usd
                        else f"our size ${target:,.2f} < ${self.min_usd:,.0f}")
@@ -118,9 +139,10 @@ class XchainPaperTrader:
                 return
             if p is None:
                 self._opening.add(key)
+            self._reserved[tkey] += size
             try:
                 await self._sleep_until(detected_at + self.delay)
-                q = await self._quote("buy", leader, evm, t.chain_id, t.token, int(size * 1e6))
+                q = await self._quote("buy", leader, evm, t.chain_id, t.token, int(size * 1e6), priority=0)
                 now = time.time()
                 if q is None:
                     self._skip(t, leader, "no Relay route for our size")
@@ -144,15 +166,18 @@ class XchainPaperTrader:
                     kind = "add"
             finally:
                 self._opening.discard(key)
+                self._reserved[tkey] -= size
+                if self._reserved[tkey] <= 1e-9:
+                    del self._reserved[tkey]
             our_price = cost / (q.out_raw / 10 ** t.decimals)
             self._fill(p, "buy", kind, 1.0, now, q, cost, q.out_raw, our_price,
                        {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd,
-                        "his_price_usd": t.price_usd})
+                        "his_price_usd": t.price_usd, "detected_at": detected_at})
 
     # ---------- exits ----------
-    async def _mirror_sell(self, chain: str, token: str, evm: str, sold_raw: int, detected_at: float,
-                           reason: str, his: dict):
-        key = (chain, token)
+    async def _mirror_sell(self, chain: str, token: str, leader: str, evm: str, sold_raw: int,
+                           detected_at: float, reason: str, his: dict):
+        key = (chain, token, leader)
         async with self.locks[key]:
             p = self.positions.get(key)
             if p is None:
@@ -182,7 +207,7 @@ class XchainPaperTrader:
         evm, d = p.timing["evm"], int(p.timing["decimals"])
         q = None
         for attempt in range(self.sell_retries):
-            q = await self._quote("sell", p.leader, evm, int(p.timing["chain_id"]), p.token, amount)
+            q = await self._quote("sell", p.leader, evm, int(p.timing["chain_id"]), p.token, amount, priority=0)
             if q is not None:
                 break
             await asyncio.sleep(min(20.0, self.mark_s))
@@ -204,7 +229,7 @@ class XchainPaperTrader:
             p.exit_reason, p.exit_sig = reason, his.get("his_ref") or ""
             p.timing.update(exit_filled_at=now)
             self.store.close_position(p)
-            self.positions.pop((p.chain, p.token), None)
+            self.positions.pop((p.chain, p.token, p.leader), None)
             kind = "close"
         else:
             self.store.update_position(p)
@@ -219,10 +244,11 @@ class XchainPaperTrader:
     # ---------- marks + safety stop ----------
     async def mark_once(self):
         for p in list(self.positions.values()):
-            if self.locks[(p.chain, p.token)].locked():
+            if self.locks[(p.chain, p.token, p.leader)].locked():
                 continue                                         # a buy/sell is in progress
             rem = int(p.timing["remaining"])
-            q = await self._quote("sell", p.leader, p.timing["evm"], int(p.timing["chain_id"]), p.token, rem)
+            q = await self._quote("sell", p.leader, p.timing["evm"], int(p.timing["chain_id"]), p.token, rem,
+                                  priority=2)
             if q is None:
                 continue
             value_rem = q.out_ui - q.gas_usd
@@ -234,8 +260,8 @@ class XchainPaperTrader:
                 self._spawn(self._stop(p, time.time()))
 
     async def _stop(self, p: Position, triggered_at: float):
-        async with self.locks[(p.chain, p.token)]:
-            if (p.chain, p.token) not in self.positions:
+        async with self.locks[(p.chain, p.token, p.leader)]:
+            if (p.chain, p.token, p.leader) not in self.positions:
                 return
             await self._sleep_until(triggered_at + self.delay)
             await self._sell(p, int(p.timing["remaining"]), "safety_stop", 1.0, {})
@@ -244,14 +270,13 @@ class XchainPaperTrader:
     async def logs_once(self):
         for chain in self.chains:
             held = {p.token.lower() for p in self.positions.values() if p.chain == chain}
-            url = self.rpc.get(chain)
             if not held:
                 self._last_block.pop(chain, None)
                 continue
-            if not url:
+            if not (self.rpc.get(chain) or self.rpc_fallback.get(chain)):
                 self._warn_logs(chain, "no RPC configured")
                 continue
-            latest = await self._eth(url, "eth_blockNumber", [])
+            latest = await self._rpc(chain, "eth_blockNumber", [])
             if not isinstance(latest, str):
                 continue
             latest = int(latest, 16)
@@ -259,7 +284,7 @@ class XchainPaperTrader:
             if frm > latest:
                 continue
             evms = sorted({p.timing["evm"] for p in self.positions.values() if p.chain == chain})
-            logs = await self._eth(url, "eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(latest),
+            logs = await self._rpc(chain, "eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(latest),
                                                          "address": sorted(held),
                                                          "topics": [TRANSFER, [pad_addr(e) for e in evms]]}])
             if not isinstance(logs, list):
@@ -273,7 +298,7 @@ class XchainPaperTrader:
                 self._seen_logs[k] = None
                 if len(self._seen_logs) > 5000:
                     self._seen_logs.popitem(last=False)
-                self._spawn(self._dex_check(chain, url, lg, time.time()))
+                self._spawn(self._dex_check(chain, lg, time.time()))
 
     def _warn_logs(self, chain: str, why: str):
         if chain not in self._logs_warned:
@@ -281,29 +306,30 @@ class XchainPaperTrader:
             log.warning("xchain: DEX sells on %s are NOT detected (%s) - only Relay sells are mirrored", chain, why)
             self.store.record_event(time.time(), "", "", "xchain_logs_unavailable", "", None, f"{chain}: {why}")
 
-    async def _dex_check(self, chain: str, url: str, lg: dict, detected_at: float):
+    async def _dex_check(self, chain: str, lg: dict, detected_at: float):
         """A token left his EVM wallet. Relay request with that deposit tx -> the Relay path handles it;
         otherwise he sold on a DEX (or moved it away): mirror it."""
         tx, token = lg["transactionHash"], lg["address"].lower()
         evm = "0x" + lg["topics"][1][-40:]
         amount = int(lg["data"], 16) if lg.get("data") not in (None, "0x") else 0
         await asyncio.sleep(self.dex_confirm_s)
-        if self.store.xtrade_has_deposit(tx) or await self.client.requests(depositTxHash=tx):
+        if self.store.xtrade_has_deposit(tx) or await self.client.requests(priority=1, depositTxHash=tx):
             return
-        leader = next((s for s, e in self.leaders.items() if e == evm), "")
-        p = self.positions.get((chain, token)) or next(
-            (q for (c, t), q in self.positions.items() if c == chain and t.lower() == token), None)
-        if p is None or amount <= 0:
+        held = [q for (c, t, _), q in self.positions.items()
+                if c == chain and t.lower() == token and q.timing.get("evm", "").lower() == evm]
+        if not held or amount <= 0:
             return
-        blk = await self._eth(url, "eth_getBlockByNumber", [lg["blockNumber"], False])
+        blk = await self._rpc(chain, "eth_getBlockByNumber", [lg["blockNumber"], False])
         his_ts = int(blk["timestamp"], 16) if isinstance(blk, dict) and blk.get("timestamp") else None
-        log.info("xchain DEX sell by %s on %s: %s raw %s (tx %s)", evm[:10], chain, amount,
-                 p.timing.get("symbol"), tx[:12])
-        self.store.record_event(time.time(), leader, tx, "xchain_dex_sell", p.token, None,
-                                f"{chain}: {amount / 10 ** int(p.timing['decimals']):,.6g} "
-                                f"{p.timing.get('symbol')} out of {evm[:10]} without a Relay request")
-        await self._mirror_sell(chain, p.token, evm, amount, detected_at, "leader_sold_dex",
-                                {"his_ref": tx, "his_ts": his_ts, "his_usd": None, "his_price_usd": None})
+        for p in held:
+            log.info("xchain DEX sell by %s (%s) on %s: %s raw %s (tx %s)", evm[:10], p.leader[:8], chain, amount,
+                     p.timing.get("symbol"), tx[:12])
+            self.store.record_event(time.time(), p.leader, tx, "xchain_dex_sell", p.token, None,
+                                    f"{chain}: {amount / 10 ** int(p.timing['decimals']):,.6g} "
+                                    f"{p.timing.get('symbol')} out of {evm[:10]} without a Relay request")
+            await self._mirror_sell(chain, p.token, p.leader, evm, amount, detected_at, "leader_sold_dex",
+                                    {"his_ref": tx, "his_ts": his_ts, "his_usd": None, "his_price_usd": None,
+                                     "detected_at": detected_at})
 
     # ---------- helpers ----------
     def _fill(self, p: Position, side: str, reason: str, frac: float, now: float, q: Quote, usd: float,
@@ -311,14 +337,17 @@ class XchainPaperTrader:
         hp = his.get("his_price_usd")
         gap = (our_price / hp - 1) * 100 if hp and our_price else None
         delay = now - his["his_ts"] if his.get("his_ts") else None
+        seen = his["detected_at"] - his["his_ts"] if his.get("his_ts") and his.get("detected_at") else None
         self.store.record_xfill(ts=now, position_id=p.id, chain=p.chain, token=p.token,
                                 symbol=p.timing.get("symbol"), side=side, reason=reason, fraction=frac,
                                 our_usd=usd, our_tokens=tokens, our_price_usd=our_price, gap_pct=gap,
-                                delay_s=delay, impact_pct=q.impact_pct, gas_usd=q.gas_usd, **his)
-        log.info("xchain paper %s %s %s: $%.2f for %s %s | ours $%.4g vs his %s (%s) | delay %s | impact %s%%",
-                 side.upper(), reason, p.chain, usd, f"{tokens / 10 ** int(p.timing['decimals']):,.6g}",
-                 p.timing.get("symbol"), our_price, f"${hp:.4g}" if hp else "n/a (DEX)",
-                 f"{gap:+.1f}%" if gap is not None else "-", f"{delay:.1f}s" if delay is not None else "-",
+                                delay_s=delay, impact_pct=q.impact_pct, gas_usd=q.gas_usd, leader=p.leader,
+                                detect_delay_s=seen, **his)
+        log.info("xchain paper %s %s %s %s: $%.2f for %s %s | ours $%.4g vs his %s (%s) | seen %s, filled %s "
+                 "after him | impact %s%%", side.upper(), reason, p.chain, p.leader[:8], usd,
+                 f"{tokens / 10 ** int(p.timing['decimals']):,.6g}", p.timing.get("symbol"), our_price,
+                 f"${hp:.4g}" if hp else "n/a (DEX)", f"{gap:+.1f}%" if gap is not None else "-",
+                 f"{seen:.1f}s" if seen is not None else "-", f"{delay:.1f}s" if delay is not None else "-",
                  q.impact_pct)
 
     def _skip(self, t: XTrade, leader: str, why: str):
@@ -326,20 +355,29 @@ class XchainPaperTrader:
         self.store.record_event(time.time(), leader, t.deposit_tx, "xchain_paper_skip", t.token, None,
                                 f"{t.chain} {t.symbol} his ${t.usd:,.2f}: {why}")
 
-    async def _quote(self, side, sol_user, evm, chain_id, token, amount_raw) -> Quote | None:
+    async def _quote(self, side, sol_user, evm, chain_id, token, amount_raw, priority: int = 1) -> Quote | None:
         if amount_raw <= 0 or self.client is None:
             return None
-        return parse_quote(await self.client.price(price_body(side, sol_user, evm, chain_id, token, amount_raw)) or {})
+        body = price_body(side, sol_user, evm, chain_id, token, amount_raw)
+        return parse_quote(await self.client.price(body, priority=priority) or {})
 
     async def _balance(self, chain: str, token: str, evm: str) -> int | None:
-        url = self.rpc.get(chain)
-        if not url:
-            return None
-        r = await self._eth(url, "eth_call", [{"to": token, "data": "0x70a08231" + pad_addr(evm)[2:]}, "latest"])
+        r = await self._rpc(chain, "eth_call", [{"to": token, "data": "0x70a08231" + pad_addr(evm)[2:]}, "latest"])
         try:
             return int(r, 16)
         except (TypeError, ValueError):
             return None
+
+    async def _rpc(self, chain: str, method: str, params: list):
+        """JSON-RPC on the chain's RPC; the public fallback if it fails (no answer or an error)."""
+        r = None
+        for url in (self.rpc.get(chain), self.rpc_fallback.get(chain)):
+            if not url:
+                continue
+            r = await self._eth(url, method, params)
+            if r is not None and not (isinstance(r, dict) and "code" in r):
+                return r
+        return r
 
     async def _eth(self, url: str, method: str, params: list):
         """JSON-RPC call -> result, or the error dict / None. Never raises."""
@@ -356,12 +394,14 @@ class XchainPaperTrader:
     async def _sleep_until(at: float):
         await asyncio.sleep(max(0.0, at - time.time()))
 
-    async def run(self, client, session, rpc: dict):
+    async def run(self, client, session, rpc: dict, rpc_fallback: dict | None = None):
         self.client, self.session, self.rpc = client, session, dict(rpc)
-        log.info("xchain PAPER trading on %s: %.2fx his size, cap $%.0f/token, min $%.0f, delay %.0fs, "
-                 "stop -%.0f%%, max %d open (%d resumed); DEX-sell logs on %s", sorted(self.chains), self.mult,
-                 self.cap, self.min_usd, self.delay, self.stop * 100, self.max_open, len(self.positions),
-                 [c for c in sorted(self.chains) if self.rpc.get(c)] or "none")
+        self.rpc_fallback = dict(rpc_fallback or {})
+        log.info("xchain PAPER trading on %s for %d leaders: %.2fx his size, cap $%.0f/token, min $%.0f, delay "
+                 "%.0fs, stop -%.0f%%, max %d open / %d per leader (%d resumed); DEX-sell logs on %s",
+                 sorted(self.chains), len(self.leaders), self.mult, self.cap, self.min_usd, self.delay,
+                 self.stop * 100, self.max_open, self.max_per_leader, len(self.positions),
+                 [c for c in sorted(self.chains) if self.rpc.get(c) or self.rpc_fallback.get(c)] or "none")
         next_mark = time.time() + min(self.mark_s, 10)
         while True:
             try:

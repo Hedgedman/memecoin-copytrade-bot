@@ -96,31 +96,43 @@ risk:
   reentry_cooldown_s: 1800
   kill_switch_file: STOP   # `touch STOP` blocks all new buys instantly
 
-# --- cross-chain WATCH-ONLY (bot/xchain): records a leader's Relay trades on other chains. Never trades. ---
+# --- cross-chain WATCH-ONLY (bot/xchain): records the leaders' Relay trades on other chains. Never trades. ---
 xchain:
   enabled: false
   api_key_env: RELAY_API_KEY          # Relay /requests/v3 needs a key (dashboard.relay.link); without it: detect + log only
-  leaders:                            # Solana wallet: his EVM address (Relay recipient)
+  all_solana_leaders: true            # watch every chains.solana.leaders wallet (EVM addresses learned from Relay)
+  leaders:                            # optional seeds: Solana wallet -> a known EVM address
     Leader-A: "0x0000000000000000000000004c65616465722d41"
-  price_delay_s: 15                   # Relay /price this long after his trade = our realistic fill
-  poll_s: 20                          # /requests/v3 poll by his wallets (finds his SELLS; safety net for buys)
+  max_relay_calls_per_min: 100        # ONE budget for all Relay calls (plan limit 200); 429 -> pause 30 s, half rate 5 min
+  price_offsets_s: [3, 6, 10, 16]     # Relay /price for his size this long after we DETECT his trade (xchain_prices)
+  payout_stream: true                 # Helius transactionSubscribe on the leaders' USDC accounts = his Relay sells, pushed
+  poll_hot_s: 30                      # /requests/v3 per EVM address (his sells) if we hold a paper position of his
+  poll_warm_s: 120                    #   ... if he traded cross-chain within warm_window_h
+  warm_window_h: 72
+  poll_cold_s: 900                    #   ... otherwise
+  poll_solana_s: 600                  # per Solana wallet (his buys): safety net, e.g. after a network outage
+  address_refresh_h: 24               # re-learn EVM addresses from his Relay history (address_lookback_d days)
+  address_lookback_d: 14
+  nonce_check_s: 600                  # with RPC: EVM txs that did not go through Relay -> leader_events xchain_evm_tx
   resolve_timeout_s: 180
-  rpc_env:                            # optional EVM nonce check (non-Relay EVM activity); public RPCs are fine
-    robinhood: ROBINHOOD_RPC_URL      # e.g. https://rpc.mainnet.chain.robinhood.com (chain id 4663)
-    bsc: BSC_RPC_URL                  # e.g. https://bsc-dataseed.bnbchain.org (chain id 56)
-  rpc_public:                         # free fallback if the env var is unset (eth_call + address-filtered eth_getLogs, ~1 h back)
+  rpc_env:                            # EVM RPC per chain (e.g. Alchemy): DEX-sell logs, balanceOf, nonce check
+    robinhood: ROBINHOOD_RPC_URL      # chain id 4663
+    bsc: BSC_RPC_URL                  # chain id 56
+  rpc_public:                         # used if the env var is unset, and as fallback when it fails
+    robinhood: "https://rpc.mainnet.chain.robinhood.com"   # chain id 4663 (checked: eth_chainId 0x1237)
     bsc: "https://bsc-rpc.publicnode.com"
-  # --- phase 2: PAPER trading of his robinhood/bsc trades. Simulated fills (Relay quotes), never trades.
+  # --- PAPER trading of the leaders' robinhood/bsc trades (others: watch-only). Simulated fills (Relay quotes).
   paper_trading:
     enabled: false                    # needs paper: true (refused otherwise)
     chains: [robinhood, bsc]
     size_mult: 0.4                    # our USD = 0.4 x his USD per buy (add-ons too)
-    max_usd_per_token: 2000           # cap per token incl. add-ons
+    max_usd_per_token: 2000           # cap per token incl. add-ons (all leaders together)
     min_usd: 50                       # skip buys where our size would be smaller
     entry_delay_s: 15                 # our realistic latency: fill = Relay quote this long after detection
     max_signal_age_s: 120             # don't enter trades detected later than this (e.g. startup poll)
-    max_open_positions: 10            # own limit, separate from the Solana risk limits
+    max_open_positions: 50            # own limit, separate from the Solana risk limits
+    max_open_per_leader: 5
     safety_stop: 0.60                 # sell everything at -60% vs the cost of what we still hold
-    mark_interval_s: 60               # Relay quote per open position (mark + stop check)
-    logs_poll_s: 15                   # eth_getLogs for Transfers out of his EVM address (DEX sells)
+    mark_interval_s: 120              # Relay quote per open position (mark + stop check)
+    logs_poll_s: 15                   # eth_getLogs for Transfers out of his EVM address (DEX sells), held tokens only
     dex_confirm_s: 15                 # then check Relay: no request for that tx = DEX sell

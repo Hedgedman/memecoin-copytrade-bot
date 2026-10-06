@@ -48,12 +48,14 @@ class Bot:
         xc = cfg.get("xchain") or {}
         self.xchain = None
         if xc.get("enabled") and "solana" in self.adapters:   # watch-only: never trades
-            self.xchain = XchainWatcher(xc, self.store)
+            sol = cfg["chains"]["solana"]
+            self.xchain = XchainWatcher(xc, self.store, solana_leaders=(sol.get("leaders") or [])
+                                        if xc.get("all_solana_leaders", True) else None, ws_url=sol.get("rpc_ws", ""))
             self.adapters["solana"].set_xchain_sink(self.xchain.on_solana_tx)
             pt = xc.get("paper_trading") or {}
-            if pt.get("enabled"):                              # phase 2: simulated fills only, own limits
+            if pt.get("enabled"):                              # simulated fills only, own limits
                 if self.paper:
-                    self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, xc.get("leaders") or {},
+                    self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, self.xchain.sol_leaders,
                                                            cfg["risk"].get("kill_switch_file", "STOP"))
                 else:
                     log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")

@@ -27,7 +27,7 @@ class FakeRelay:
         self.relay_deposits = set()            # EVM tx hashes that are Relay requests
         self.calls = []
 
-    async def price(self, body):
+    async def price(self, body, priority=1):
         self.calls.append(body)
         if body["originChainId"] == 792703809:                       # buy: USDC -> token
             p = self.price_usd.get(body["destinationCurrency"])
@@ -45,7 +45,7 @@ class FakeRelay:
                 "details": {"currencyOut": {"amount": str(out), "amountFormatted": str(fmt)},
                             "totalImpact": {"percent": "-1.5"}}}
 
-    async def requests(self, **params):
+    async def requests(self, priority=1, **params):
         self.calls.append(params)
         return [{"id": "r"}] if params.get("depositTxHash") in self.relay_deposits else []
 
@@ -197,8 +197,8 @@ async def dex_tests():
     assert ev == [("xchain_dex_sell", "0xdex")], ev
     # no RPC for logs: warned once, recorded
     t2, store2, *_ = make(rpc=False)
-    t2.positions[("bsc", TOK)] = t.positions[("robinhood", TOK)]
-    t2.positions[("bsc", TOK)].chain = "bsc"
+    t2.positions[("bsc", TOK, W)] = t.positions[("robinhood", TOK, W)]
+    t2.positions[("bsc", TOK, W)].chain = "bsc"
     await t2.logs_once(); await t2.logs_once()
     assert store2.db.execute("SELECT COUNT(*) FROM leader_events WHERE kind='xchain_logs_unavailable'").fetchone()[0] == 1
     print("DEX sells: Transfer out without Relay request -> mirrored; Relay transfer ignored; no RPC -> flagged once")
@@ -229,7 +229,7 @@ async def stop_and_limits_tests():
     assert pos(store, TOK3) is None
     # resume: open xchain positions come back in the trader, not in the Solana resume
     t2 = XchainPaperTrader({"chains": ["robinhood"]}, store, True, {W: EVM})
-    assert list(t2.positions) == [("robinhood", TOK2)]
+    assert list(t2.positions) == [("robinhood", TOK2, W)]
     assert store.load_open(True, chains={"solana": None}) == []
     try:
         XchainPaperTrader({}, store, False, {W: EVM})
@@ -255,7 +255,7 @@ async def wiring_tests():
     tok = req["data"]["route"]["actual"]["destination"]["outputCurrency"]["currency"]["address"]
     relay.price_usd[tok] = 4.5e-05
     t.client = relay
-    w = XchainWatcher({"leaders": {W: EVM}, "price_delay_s": 0}, store, relay)
+    w = XchainWatcher({"leaders": {W: EVM}, "price_offsets_s": [0]}, store, relay)
     w.trader = t
     w.record(W, req, via="stream", detected_at=time.time())
     w.record(W, req, via="poll")                                            # duplicate: no second buy
@@ -290,7 +290,7 @@ async def whatif_tests():
     assert f"actual closed PnL ${actual:+,.2f}" in out.stdout, out.stdout
     from whatif_xchain import load, simulate
     data = load(sqlite3.connect(db_path), 0)
-    ev = data[0][-1]
+    ev = data[0][5]
     mirror = simulate(ev, "mirror", 0.60)
     assert abs(mirror[0] - actual) / 400 < 0.01 and not mirror[1], (mirror, actual)   # replays the bot
     first = simulate(ev, "first_sell", None)

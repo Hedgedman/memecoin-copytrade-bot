@@ -69,7 +69,7 @@ class FakeRelay:
     def __init__(self, key=True, pending_first=0, age_s=0):
         self.has_key, self.calls, self.pending, self.age = key, [], pending_first, age_s
 
-    async def requests(self, **params):
+    async def requests(self, priority=1, **params):
         self.calls.append(params)
         if not self.has_key:
             return None
@@ -87,14 +87,18 @@ class FakeRelay:
             return [dict(h, status="pending") for h in hits]
         return hits
 
-    async def price(self, body):
+    async def requests_page(self, priority=1, **params):
+        r = await self.requests(priority, **params)
+        return None if r is None else (r, None)
+
+    async def price(self, body, priority=1):
         self.calls.append({"price": body})
         return PRICE["robinhood"] if body["destinationChainId"] == 4663 else None
 
 
 def watcher(client, **cfg):
     store = Store(tempfile.mktemp())
-    w = XchainWatcher({"leaders": {W: EVM}, "price_delay_s": 0, "resolve_timeout_s": 10, **cfg}, store, client)
+    w = XchainWatcher({"leaders": {W: EVM}, "price_offsets_s": [0], "resolve_timeout_s": 10, **cfg}, store, client)
     return w, store
 
 
