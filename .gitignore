@@ -1,0 +1,9 @@
+config.yaml
+*.db
+*.log
+STOP
+.venv/
+__pycache__/
+.idea/
+backup/
+bot/chains/solana_backup*.py
