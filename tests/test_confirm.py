@@ -1,4 +1,4 @@
-"""Confirmed-stop tests (bot + what-if): python -m tests.test_confirm"""
+"""Stops: bot stops at once; what-if --confirm / hard stop; bot vs what-if parity: python -m tests.test_confirm"""
 import asyncio, tempfile, time
 from bot.models import Fill, Position
 from bot.positions import PositionManager
@@ -15,8 +15,7 @@ class A:
 
 def manager(**cfg):
     base = {"take_profit": 0, "stop_loss": 0.10, "stop_basis": "entry_price", "max_hold_s": 0,
-            "trailing_activate": 0.5, "trailing_pct": 0.3, "mark_interval_s": 0,
-            "stop_confirm_s": 0.2, "hard_stop": 0.25}
+            "trailing_activate": 0.5, "trailing_pct": 0.3, "mark_interval_s": 0}
     base.update(cfg)
     store, a = Store(tempfile.mktemp()), A()
     pm = PositionManager(base, {"solana": a}, store)
@@ -26,27 +25,35 @@ def manager(**cfg):
 
 
 async def bot_tests():
-    pm, a, p = manager()
+    # Stop confirmation was tested and rejected: the bot stops at once. Old config keys are ignored.
+    pm, a, p = manager(stop_confirm_s=2, hard_stop=0.25)
     await pm._check(p)                         # reference = 1.0
-    a.value = 0.88; await pm._check(p)         # below -10%: starts confirmation, no sale yet
-    assert p.status == "open" and p.below_since is not None
-    a.value = 0.97; await pm._check(p)         # recovers within 0.2 s
-    assert p.status == "open" and p.below_since is None
-    await asyncio.sleep(0.3); assert p.status == "open"   # pending re-check finds it recovered
-    a.value = 0.87; await pm._check(p)         # dips again and STAYS there
-    await asyncio.sleep(0.3)                   # re-check fires after 0.2 s without new ticks
+    a.value = 0.92; await pm._check(p)         # -8%: above the stop
+    assert p.status == "open"
+    a.value = 0.88; await pm._check(p)         # -12%: sold immediately, no confirmation window
     assert p.status == "closed" and p.exit_reason == "stop_loss", (p.status, p.exit_reason)
+    print("bot: stop fires immediately (stop_confirm_s / hard_stop are not bot settings)")
 
+
+def whatif_bot_parity():
+    """With confirm=0 the what-if must exit on the same tick as the bot."""
+    base = PoolState("pumpswap_amm", 10**12, 100 * L)
+    k = base.sol_res * base.tok_res
+    at = lambda m: PoolState("pumpswap_amm", k // int(base.sol_res * m ** 0.5), int(base.sol_res * m ** 0.5))
+    tokens = base.buy_out(int(0.5 * L), 0)
+    cost = base.sell_out(tokens, 0) / L
+    path = [1.0, 0.95, 0.91, 0.87, 0.80, 1.2]
+    v, censored = run(Pos(1, cost, tokens, 0, [(t, at(m), 0, 1.0) for t, m in enumerate(path)]),
+                      "fixed", 1.0, 0, 0.10, 0.0, 0.0, "entry_price", 0.5)
+    assert not censored and abs(v / cost - 0.87) < 0.01, v / cost      # sold at the 0.87 tick
     pm, a, p = manager()
-    await pm._check(p)
-    a.value = 0.70; await pm._check(p)         # -30%: hard stop, no waiting
-    assert p.exit_reason == "hard_stop"
-
-    pm, a, p = manager(stop_confirm_s=0)
-    await pm._check(p)
-    a.value = 0.88; await pm._check(p)         # confirmation off: immediate, as before
-    assert p.exit_reason == "stop_loss"
-    print("bot: dip recovers -> held, sustained dip -> sold after window, crash -> hard stop")
+    for m in path:
+        a.value = m * p.cost
+        asyncio.run(pm._check(p))
+        if p.status == "closed":
+            break
+    assert p.exit_reason == "stop_loss" and abs(a.value / p.cost - 0.87) < 1e-9
+    print("parity: bot and what-if (confirm=0) stop on the same tick")
 
 
 def whatif_tests():
@@ -74,5 +81,6 @@ def whatif_tests():
 
 if __name__ == "__main__":
     asyncio.run(bot_tests())
+    whatif_bot_parity()
     whatif_tests()
     print("ALL PASSED")
