@@ -12,6 +12,7 @@ from .models import Position, Signal
 from .positions import PositionManager
 from .risk import RiskManager
 from .store import Store
+from .xchain.watcher import XchainWatcher
 
 log = logging.getLogger("main")
 
@@ -43,6 +44,11 @@ class Bot:
             a.set_tick_sink(self.store.record_ticks)
             a.set_factor_sink(self.store.record_factor)
             a.set_event_sink(self.store.record_event)
+        xc = cfg.get("xchain") or {}
+        self.xchain = None
+        if xc.get("enabled") and "solana" in self.adapters:   # watch-only: never trades
+            self.xchain = XchainWatcher(xc, self.store)
+            self.adapters["solana"].set_xchain_sink(self.xchain.on_solana_tx)
 
     def _skip(self, s: Signal, why: str):
         self.store.log_signal(s, "skip", why)
@@ -125,6 +131,8 @@ class Bot:
             self.pm.add(p)
         tasks = [asyncio.create_task(a.listen(self.queue)) for a in self.adapters.values()]
         tasks += [asyncio.create_task(self.consume()), asyncio.create_task(self.pm.run())]
+        if self.xchain:
+            tasks.append(asyncio.create_task(self.xchain.run()))
         log.info("running: chains=%s paper=%s", list(self.adapters), self.paper)
         try:
             await asyncio.gather(*tasks)

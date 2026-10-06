@@ -1,0 +1,658 @@
+{
+ "_note": "RECONSTRUCTED: real v2 /requests responses for Leader-A (2026-10-05/06) rewritten into the documented v3 shape (route.actual.origin.inputCurrency / destination.outputCurrency, txHash, root sender). Replace with a recorded v3 response once RELAY_API_KEY exists.",
+ "requests": [
+  {
+   "id": "0x1791233381e24df3ca85950ef70750253295218aa18042987d62020b8888a06c",
+   "status": "success",
+   "user": "Leader-A",
+   "recipient": "0x0000000000000000000000004c65616465722d41",
+   "sender": "Leader-A",
+   "requestType": "Crosschain Swap",
+   "createdAt": "2026-10-05T20:49:45.629Z",
+   "updatedAt": "2026-10-05T20:50:16.329Z",
+   "data": {
+    "failReason": null,
+    "refundFailReason": null,
+    "inTxs": [
+     {
+      "txHash": "zj4QWdZUnK3a7aGSceNuUqgHMhjEnsu1op8iKZscjmsUwV5BxpaE2aUWqYXPL8qRNb1pZde2SdyMz584sHm8ZWP",
+      "chainId": 792703809,
+      "timestamp": 1791233384,
+      "block": 453691243,
+      "type": "onchain",
+      "fee": "42207",
+      "status": "success"
+     }
+    ],
+    "outTxs": [
+     {
+      "txHash": "0x5e3d89ce3985173ad6b4e6101581389dde8470ce8d9ad73478897e2f3cf5ca2f",
+      "chainId": 4663,
+      "timestamp": 1791233386,
+      "block": 81080769,
+      "type": "onchain",
+      "fee": "48151867154000",
+      "status": "success"
+     }
+    ],
+    "route": {
+     "quoted": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "1200000000",
+        "amountFormatted": "1200.0",
+        "amountUsd": "1199.882400",
+        "minimumAmount": "1200000000"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 4663,
+         "address": "0x4d1a5911f3730f82f15a73351757c7e69e7fbcfe",
+         "symbol": "MININGMART",
+         "name": "Mining Mart",
+         "decimals": 18,
+         "metadata": {
+          "verified": false
+         }
+        },
+        "amount": "28715964887607914656283786",
+        "amountFormatted": "28715964.887607914656283786",
+        "amountUsd": "1062.777860",
+        "minimumAmount": "18664530782861371773122871"
+       }
+      }
+     },
+     "actual": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "1200000000",
+        "amountFormatted": "1200.0",
+        "amountUsd": "1199.882400",
+        "minimumAmount": "1200000000"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 4663,
+         "address": "0x4d1a5911f3730f82f15a73351757c7e69e7fbcfe",
+         "symbol": "MININGMART",
+         "name": "Mining Mart",
+         "decimals": 18,
+         "metadata": {
+          "verified": false
+         }
+        },
+        "amount": "28715964887607914656283786",
+        "amountFormatted": "28715964.887607914656283786",
+        "amountUsd": "1062.777860",
+        "minimumAmount": "18664530782861371773122871"
+       }
+      }
+     }
+    }
+   },
+   "protocol": {
+    "orderId": "0x84fa55d5495f31767b9e2be64eed75aedb9d3d69138f0616dc4548f41a3645a5",
+    "hubType": "onchain",
+    "isWithdrawable": false,
+    "solver": {
+     "address": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+     "protocolChainId": "base",
+     "chainId": 8453
+    },
+    "deposit": {
+     "origin": {
+      "amount": "1200000000",
+      "chainId": 792703809,
+      "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "depositor": "Leader-A",
+      "depository": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+      "onchainId": "0x7b6103f4e5eee8bf4294894d56132c9143c3ba0ac63bd3e3c9c6be5d6f29afbc",
+      "transactionId": "zj4QWdZUnK3a7aGSceNuUqgHMhjEnsu1op8iKZscjmsUwV5BxpaE2aUWqYXPL8qRNb1pZde2SdyMz584sHm8ZWP"
+     },
+     "relay": {
+      "amount": "1200000000",
+      "chainId": 537713,
+      "currency": "72630457970927688859518598921094794508663362931548696331709346694245435211328",
+      "hash": "0xc5146a69a41f851beec32784c95a92030408a0456382e4efc6286736665b89de",
+      "operation": "mint",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "USD Coin on Solana",
+       "symbol": "solana-USDC"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b5eb8740571ed584e9c0887d98ccce6b3fad0259a09361e65480ee9ecad8863fdceef346cb004c0cb4ee7f28d7e282e2d9aa7e400000000000000000000000000000000000000000000000000000000047868c00"
+       ],
+       "idempotencyKey": "0xf5e347a061571b5403468d5f980284f50f486d7b04bd4b1de478e5a2d09fadeb"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x5be2dd28f7810582ed6dc910fd8693878a1d90f2",
+        "signature": "0x0bbb19260e78657d03af15a73e16674540b55e4bb6a6627aed630155eea16c4751b695467ae438455d7173040c7f9b2aeefe575ff5b7aad3457e452fa3d43d851b"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0xa41716ff5a7d4ad22f83b7cb74d9af9767a96a52",
+        "signature": "0x666ae9b15aa289582c477a32d2a7dde9a3a5636452c263afa0a88a89844ce1e6711e67ca77b6ae36329e999a7fa5c4487eb5f6b67e7a4abbbb79022157a743ba1c"
+       }
+      ]
+     }
+    },
+    "settlement": {
+     "destination": {
+      "fills": [
+       {
+        "chainId": 4663,
+        "transactionId": "0x5e3d89ce3985173ad6b4e6101581389dde8470ce8d9ad73478897e2f3cf5ca2f"
+       }
+      ],
+      "refunds": []
+     },
+     "relay": {
+      "amount": "1200000000",
+      "chainId": 537713,
+      "currency": "72630457970927688859518598921094794508663362931548696331709346694245435211328",
+      "hash": "0xc5146a69a41f851beec32784c95a92030408a0456382e4efc6286736665b89de",
+      "operation": "transfer",
+      "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "USD Coin on Solana",
+       "symbol": "solana-USDC"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000b5eb8740571ed584e9c0887d98ccce6b3fad0259000000000000000000000000d5fa4f5834722d85d95f45387ed60ce09ba4e36fa09361e65480ee9ecad8863fdceef346cb004c0cb4ee7f28d7e282e2d9aa7e400000000000000000000000000000000000000000000000000000000047868c00"
+       ],
+       "idempotencyKey": "0x8cdeed324e55b6198ebba9df3430cfa5690534dd16cd1ad17fea0995f8e24913"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x5be2dd28f7810582ed6dc910fd8693878a1d90f2",
+        "signature": "0xe70a664a6404fd5c4825e44da36c25aba95fa45bcbbce1e6bff7f08f5a63aac62c459854dab2a23fe04a26f452573d80f27019712ad1a0a120a1d3b06de7e4ca1c"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0xa41716ff5a7d4ad22f83b7cb74d9af9767a96a52",
+        "signature": "0x4cc53aca249e1145f94fe43c415129a8997d9c3fc3eb9038b2555d6c70c0cd8942425efc6d750f84a42bb1afd8c7d4c2c1a5c0f33272132d77738b5beb998a6e1b"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "0x1791261323ad30b4f4b5e1a5af598556d20110c6b25e1227e9a80e2c0854f478",
+   "status": "success",
+   "user": "Leader-A",
+   "recipient": "0x0000000000000000000000004c65616465722d41",
+   "sender": "Leader-A",
+   "requestType": "Crosschain Swap",
+   "createdAt": "2026-10-06T04:35:25.443Z",
+   "updatedAt": "2026-10-06T04:35:31.511Z",
+   "data": {
+    "failReason": null,
+    "refundFailReason": null,
+    "inTxs": [
+     {
+      "txHash": "2PXvpgn3RytRQGnDgc7BXjtiBR8rTaQdGq1N5pzCZrWBxRsHFAjB9WiZXGnSoHNXGakzo4PDNW1oAYeD8xjL3KxE",
+      "chainId": 792703809,
+      "timestamp": 1791261325,
+      "block": 453795412,
+      "type": "onchain",
+      "fee": "39843",
+      "status": "success"
+     }
+    ],
+    "outTxs": [
+     {
+      "txHash": "0x09156fc212b14819bbc2e6ddf03df427ec5b39adebe9a193e5f3635a09f7dd52",
+      "chainId": 56,
+      "timestamp": 1791261326,
+      "block": 125997035,
+      "type": "onchain",
+      "fee": "178003520500000",
+      "status": "success"
+     }
+    ],
+    "route": {
+     "quoted": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "100000000",
+        "amountFormatted": "100.0",
+        "amountUsd": "99.988200",
+        "minimumAmount": "100000000"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 56,
+         "address": "0xe3e96140f464196440959439ca42f01f986a7777",
+         "symbol": "ZKBNB",
+         "name": "zkBNB",
+         "decimals": 18,
+         "metadata": {
+          "verified": false
+         }
+        },
+        "amount": "758699846614807769457095",
+        "amountFormatted": "758699.846614807769457095",
+        "amountUsd": "96.316946",
+        "minimumAmount": "415604983425257252434167"
+       }
+      }
+     },
+     "actual": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "100000000",
+        "amountFormatted": "100.0",
+        "amountUsd": "99.988200",
+        "minimumAmount": "100000000"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 56,
+         "address": "0xe3e96140f464196440959439ca42f01f986a7777",
+         "symbol": "ZKBNB",
+         "name": "zkBNB",
+         "decimals": 18,
+         "metadata": {
+          "verified": false
+         }
+        },
+        "amount": "758699846614807769457095",
+        "amountFormatted": "758699.846614807769457095",
+        "amountUsd": "96.316946",
+        "minimumAmount": "415604983425257252434167"
+       }
+      }
+     }
+    }
+   },
+   "protocol": {
+    "orderId": "0xf7243131c453a428c7b2855cbdbe07d0530f290544529887000518add7ea4676",
+    "hubType": "onchain",
+    "isWithdrawable": false,
+    "solver": {
+     "address": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+     "protocolChainId": "base",
+     "chainId": 8453
+    },
+    "deposit": {
+     "origin": {
+      "amount": "100000000",
+      "chainId": 792703809,
+      "currency": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "depositor": "Leader-A",
+      "depository": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+      "onchainId": "0x552a55e6963115ee3a57a8f826423819f277745b7e9fdfbea67b9fa035b5033f",
+      "transactionId": "2PXvpgn3RytRQGnDgc7BXjtiBR8rTaQdGq1N5pzCZrWBxRsHFAjB9WiZXGnSoHNXGakzo4PDNW1oAYeD8xjL3KxE"
+     },
+     "relay": {
+      "amount": "100000000",
+      "chainId": 537713,
+      "currency": "72630457970927688859518598921094794508663362931548696331709346694245435211328",
+      "hash": "0x6b41de1df96ae2110887a509b698812706b0dae55ea740d305ce5c99002cf0a2",
+      "operation": "mint",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "USD Coin on Solana",
+       "symbol": "solana-USDC"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bd77be32e6450e707b6d17ad83b95ba0d44702e3a09361e65480ee9ecad8863fdceef346cb004c0cb4ee7f28d7e282e2d9aa7e400000000000000000000000000000000000000000000000000000000005f5e100"
+       ],
+       "idempotencyKey": "0x27d910fd15b371167ad4da0ed9b41d1f51c67cb9adbd8d1ef5a19c72dc7b1f28"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x2c598f73a5ab65c0510fd8efb740826d291cab0e",
+        "signature": "0x4eb8923480ed1928ff5eb2b973885a25f60b1ffafb8f9f52f6c452940c9924c43f6d60c3785c4ed4d3defbe925568f85ebb69466ff8f96a219a35d86149806091c"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0xa41716ff5a7d4ad22f83b7cb74d9af9767a96a52",
+        "signature": "0xf347ffa1fc04f53469bb594d6b663c9be1f9529cdcabf9c28a09c12948cf039722731022a305fc4d65c42688c6f8d200327a2cc36f842bee5374138cf4e615341c"
+       }
+      ]
+     }
+    },
+    "settlement": {
+     "destination": {
+      "fills": [
+       {
+        "chainId": 56,
+        "transactionId": "0x09156fc212b14819bbc2e6ddf03df427ec5b39adebe9a193e5f3635a09f7dd52"
+       }
+      ],
+      "refunds": []
+     },
+     "relay": {
+      "amount": "100000000",
+      "chainId": 537713,
+      "currency": "72630457970927688859518598921094794508663362931548696331709346694245435211328",
+      "hash": "0x6b41de1df96ae2110887a509b698812706b0dae55ea740d305ce5c99002cf0a2",
+      "operation": "transfer",
+      "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "USD Coin on Solana",
+       "symbol": "solana-USDC"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000bd77be32e6450e707b6d17ad83b95ba0d44702e3000000000000000000000000d5fa4f5834722d85d95f45387ed60ce09ba4e36fa09361e65480ee9ecad8863fdceef346cb004c0cb4ee7f28d7e282e2d9aa7e400000000000000000000000000000000000000000000000000000000005f5e100"
+       ],
+       "idempotencyKey": "0x0d9dabd5b9c8d919dbfcb3ee1b6241f585703db3d658f0ebfe653bdcd2546e47"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x5be2dd28f7810582ed6dc910fd8693878a1d90f2",
+        "signature": "0xc41bd42e9ed612d6a2cdb61082ccf2f1a65d2c1eb756543a3a7d019ecadeae8836205376538c6d778b87ccb812843fdfda90b7d6f1a39ad0ff58c2896e3895f31c"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0xa41716ff5a7d4ad22f83b7cb74d9af9767a96a52",
+        "signature": "0x0b22ab2954f67281053f474883a867c8d507468dc0c06661a1db28195c5afade009647ede5abcb2b8c5b421cbc1ca8987124aee6816071b0936da401e1adc7f11b"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": "0x179127260762cf28d37a235cf11d09e10fd59cd5792ab8cee70f59f2496a4b69",
+   "status": "success",
+   "user": "0x0000000000000000000000004c65616465722d41",
+   "recipient": "Leader-A",
+   "sender": "0x0000000000000000000000004c65616465722d41",
+   "requestType": "Crosschain Swap",
+   "createdAt": "2026-10-06T07:43:29.978Z",
+   "updatedAt": "2026-10-06T07:43:41.074Z",
+   "data": {
+    "failReason": null,
+    "refundFailReason": null,
+    "inTxs": [
+     {
+      "txHash": "0x44722869c4fd675253264cf01933d56009bb35392ad9e6ea0fe2f82974b1cda3",
+      "chainId": 4663,
+      "timestamp": 1791272609,
+      "block": 81463754,
+      "type": "onchain",
+      "fee": "32265746800000",
+      "status": "success"
+     }
+    ],
+    "outTxs": [
+     {
+      "txHash": "4reUd8Nuvd7bTmVtzAGMgujvNgynJXkTg5RMGnnoaXVhpjwWpxEVQP91d2yDcezFp1zivJFeB4Nz1wwJFJd2T7Un",
+      "chainId": 792703809,
+      "timestamp": 1791272610,
+      "block": 453837545,
+      "type": "onchain",
+      "fee": "5013",
+      "status": "success"
+     }
+    ],
+    "route": {
+     "quoted": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 4663,
+         "address": "0xedbf91223639800bcd5756815caf908df3b890be",
+         "symbol": "PRIORS",
+         "name": "Priors Agents",
+         "decimals": 18,
+         "metadata": {
+          "logoURI": "https://assets.geckoterminal.com/opwpw1t0yt879pslxzqt1rgv8j5p",
+          "verified": false
+         }
+        },
+        "amount": "205769619661530274669014",
+        "amountFormatted": "205769.619661530274669014",
+        "amountUsd": "2106.050000",
+        "minimumAmount": "205769619661530274669014"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "2082534452",
+        "amountFormatted": "2082.534452",
+        "amountUsd": "2082.240815",
+        "minimumAmount": "2082534452"
+       }
+      }
+     },
+     "actual": {
+      "origin": {
+       "inputCurrency": {
+        "currency": {
+         "chainId": 4663,
+         "address": "0xedbf91223639800bcd5756815caf908df3b890be",
+         "symbol": "PRIORS",
+         "name": "Priors Agents",
+         "decimals": 18,
+         "metadata": {
+          "logoURI": "https://assets.geckoterminal.com/opwpw1t0yt879pslxzqt1rgv8j5p",
+          "verified": false
+         }
+        },
+        "amount": "205769619661530274669014",
+        "amountFormatted": "205769.619661530274669014",
+        "amountUsd": "2106.050000",
+        "minimumAmount": "205769619661530274669014"
+       }
+      },
+      "destination": {
+       "outputCurrency": {
+        "currency": {
+         "chainId": 792703809,
+         "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+         "symbol": "USDC",
+         "name": "USD Coin",
+         "decimals": 6,
+         "metadata": {
+          "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+          "verified": true
+         }
+        },
+        "amount": "2082534452",
+        "amountFormatted": "2082.534452",
+        "amountUsd": "2082.240815",
+        "minimumAmount": "2082534452"
+       }
+      }
+     }
+    }
+   },
+   "protocol": {
+    "orderId": "0xafe6cc678645a7cc5faab0a6c12b61d7d029064cc2854137bc8ea86d8ec61cf2",
+    "hubType": "onchain",
+    "isWithdrawable": false,
+    "solver": {
+     "address": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+     "protocolChainId": "base",
+     "chainId": 8453
+    },
+    "deposit": {
+     "origin": {
+      "amount": "2094029637",
+      "chainId": 4663,
+      "currency": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+      "depositor": "0x0000000000000000000000004c65616465722d41",
+      "depository": "0x4cd00e387622c35bddb9b4c962c136462338bc31",
+      "onchainId": "0xf06e63b8106fd42f6399385f81617cb3dba96f74425a0504a9dd35e39d74e1f5",
+      "transactionId": "0x44722869c4fd675253264cf01933d56009bb35392ad9e6ea0fe2f82974b1cda3"
+     },
+     "relay": {
+      "amount": "2094029637",
+      "chainId": 537713,
+      "currency": "102941514821908275032578547095982593937640619625314988773105117064283340880509",
+      "hash": "0xb2c832a60f746ec2d73fea6bba2c82bd36aa73b25d16dcf2f5303ac7292a9e88",
+      "operation": "mint",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "Global Dollar on Robinhood Chain",
+       "symbol": "robinhood-USDG"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e76d09ddeeb77417491bfb8c1468a1ef56320a64e396d52762910429bb99ae2ab8ce319724b172113edc5e310979dbe37d8f3a7d000000000000000000000000000000000000000000000000000000007cd05b45"
+       ],
+       "idempotencyKey": "0x4a4d65e54af7c96df0c93ce986595d2500c3ba81f3af9f6042f34a149ae542ad"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x5be2dd28f7810582ed6dc910fd8693878a1d90f2",
+        "signature": "0x7b97857ecb72e456eb04fe95b8eb2d9a372707d591f8007d1731756a7974254d39a71358ecb64182711efc22e450950a98c6fd1f701f4b2bba1b89136d1c23b01c"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0xa41716ff5a7d4ad22f83b7cb74d9af9767a96a52",
+        "signature": "0xe13e51c5403924d848951b05cf6cd71c0da9ef09c0f6fa21f91c06e99eeaa3d817224c31a4003a24947e65e7a416ec77a5b3df4bd8b58d8be02f20485ac1cd271b"
+       }
+      ]
+     }
+    },
+    "settlement": {
+     "destination": {
+      "fills": [
+       {
+        "chainId": 792703809,
+        "transactionId": "4reUd8Nuvd7bTmVtzAGMgujvNgynJXkTg5RMGnnoaXVhpjwWpxEVQP91d2yDcezFp1zivJFeB4Nz1wwJFJd2T7Un"
+       }
+      ],
+      "refunds": []
+     },
+     "relay": {
+      "amount": "2094029637",
+      "chainId": 537713,
+      "currency": "102941514821908275032578547095982593937640619625314988773105117064283340880509",
+      "hash": "0xb2c832a60f746ec2d73fea6bba2c82bd36aa73b25d16dcf2f5303ac7292a9e88",
+      "operation": "transfer",
+      "solver": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+      "tokenMetadata": {
+       "decimals": 6,
+       "name": "Global Dollar on Robinhood Chain",
+       "symbol": "robinhood-USDG"
+      }
+     },
+     "attestation": {
+      "execution": {
+       "actions": [
+        "0x0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000e76d09ddeeb77417491bfb8c1468a1ef56320a64000000000000000000000000d5fa4f5834722d85d95f45387ed60ce09ba4e36fe396d52762910429bb99ae2ab8ce319724b172113edc5e310979dbe37d8f3a7d000000000000000000000000000000000000000000000000000000007cd05b45"
+       ],
+       "idempotencyKey": "0x249a29494ca0943dc5dca82289d252a290e044fd13be6007a760e949ed915336"
+      },
+      "attestations": [
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x2c598f73a5ab65c0510fd8efb740826d291cab0e",
+        "signature": "0x5433081f17146e2c888f0ab68aa2e92137b112efd896e744ca86c8a7f3572092251ff28eb72021b9af3c17b3d9fbfdc4a16b67af7da82fbffe775cc0dfb42eb81c"
+       },
+       {
+        "oracleChainId": "537713",
+        "oracleContract": "0xd180dc3b8cb71b185c563b6e4857592ca93dacaf",
+        "signerAddress": "0x5be2dd28f7810582ed6dc910fd8693878a1d90f2",
+        "signature": "0x14899730e3eed348e7d7ec5741c78fffdceaad26abcd3032c54e9591cd0dd12e381e1f585b78ce684e1683dc0f185b0d0e5ece8c987d6709e082c6457e951c451b"
+       }
+      ]
+     }
+    }
+   }
+  }
+ ]
+}

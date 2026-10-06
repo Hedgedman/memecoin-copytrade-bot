@@ -95,3 +95,16 @@ risk:
   max_open_positions: 3
   reentry_cooldown_s: 1800
   kill_switch_file: STOP   # `touch STOP` blocks all new buys instantly
+
+# --- cross-chain WATCH-ONLY (bot/xchain): records a leader's Relay trades on other chains. Never trades. ---
+xchain:
+  enabled: false
+  api_key_env: RELAY_API_KEY          # Relay /requests/v3 needs a key (dashboard.relay.link); without it: detect + log only
+  leaders:                            # Solana wallet: his EVM address (Relay recipient)
+    Leader-A: "0x0000000000000000000000004c65616465722d41"
+  price_delay_s: 15                   # Relay /price this long after his trade = our realistic fill
+  poll_s: 20                          # /requests/v3 poll by his wallets (finds his SELLS; safety net for buys)
+  resolve_timeout_s: 180
+  rpc_env:                            # optional EVM nonce check (non-Relay EVM activity); public RPCs are fine
+    robinhood: ROBINHOOD_RPC_URL      # e.g. https://rpc.mainnet.chain.robinhood.com (chain id 4663)
+    bsc: BSC_RPC_URL                  # e.g. https://bsc-dataseed.bnbchain.org (chain id 56)

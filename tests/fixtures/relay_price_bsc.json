@@ -1,0 +1,168 @@
+{
+ "fees": {
+  "gas": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "11111111111111111111111111111111",
+    "symbol": "SOL",
+    "name": "Solana",
+    "decimals": 9,
+    "metadata": {
+     "logoURI": "https://upload.wikimedia.org/wikipedia/en/b/b9/Solana_logo.png",
+     "verified": true
+    }
+   },
+   "amount": "26522",
+   "amountFormatted": "0.000026522",
+   "amountUsd": "0.003220",
+   "minimumAmount": "26522"
+  },
+  "relayer": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "587951",
+   "amountFormatted": "0.587951",
+   "amountUsd": "0.587894",
+   "minimumAmount": "587951"
+  },
+  "relayerGas": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "95451",
+   "amountFormatted": "0.095451",
+   "amountUsd": "0.095442",
+   "minimumAmount": "95451"
+  },
+  "relayerService": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "492500",
+   "amountFormatted": "0.4925",
+   "amountUsd": "0.492452",
+   "minimumAmount": "492500"
+  },
+  "app": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "0",
+   "amountFormatted": "0.0",
+   "amountUsd": "0",
+   "minimumAmount": "0"
+  },
+  "subsidized": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "0",
+   "amountFormatted": "0.0",
+   "amountUsd": "0",
+   "minimumAmount": "0"
+  }
+ },
+ "details": {
+  "operation": "swap",
+  "sender": "Leader-A",
+  "recipient": "0x0000000000000000000000004c65616465722d41",
+  "currencyIn": {
+   "currency": {
+    "chainId": 792703809,
+    "address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "symbol": "USDC",
+    "name": "USD Coin",
+    "decimals": 6,
+    "metadata": {
+     "logoURI": "https://coin-images.coingecko.com/coins/images/6319/large/usdc.png?1696506694",
+     "verified": true
+    }
+   },
+   "amount": "100000000",
+   "amountFormatted": "100.0",
+   "amountUsd": "99.990300",
+   "minimumAmount": "100000000"
+  },
+  "currencyOut": {
+   "currency": {
+    "chainId": 56,
+    "address": "0xe3e96140f464196440959439ca42f01f986a7777",
+    "symbol": "ZKBNB",
+    "name": "zkBNB",
+    "decimals": 18,
+    "metadata": {
+     "verified": false
+    }
+   },
+   "amount": "850872571310217440748382",
+   "amountFormatted": "850872.571310217440748382",
+   "amountUsd": "96.252936",
+   "minimumAmount": "833855119884013091933415"
+  },
+  "totalImpact": {
+   "usd": "-3.737364",
+   "percent": "-3.74"
+  },
+  "swapImpact": {
+   "usd": "-3.149470",
+   "percent": "-3.15"
+  },
+  "rate": "8508.725713102174",
+  "slippageTolerance": {
+   "total": "200",
+   "origin": {
+    "usd": "0.000000",
+    "value": "0",
+    "percent": "0.00"
+   },
+   "destination": {
+    "usd": "1.915433",
+    "value": "17017451426204348814967",
+    "percent": "1.99"
+   }
+  },
+  "timeEstimate": 1,
+  "userBalance": "0"
+ }
+}

@@ -257,6 +257,7 @@ class SolanaAdapter(ChainAdapter):
         self._corr_at: dict[str, float] = {}         # token -> last calibration time
         self._factor_sink = None
         self._event_sink = None
+        self._xchain_sink = None
         self.hub = AccountHub(self.ws_url, self._on_account, on_connect=self._refresh_all)
         self._pools: dict[str, _Pool] = {}
         self._acct_token: dict[str, str] = {}
@@ -343,6 +344,17 @@ class SolanaAdapter(ChainAdapter):
 
     def set_event_sink(self, sink):
         self._event_sink = sink
+
+    def set_xchain_sink(self, sink):
+        """sink(leader, sig, tx): leader txs we did not copy (cross-chain watcher, bot/xchain)."""
+        self._xchain_sink = sink
+
+    def _xchain(self, leader: str, sig: str, tx: dict | None):
+        if self._xchain_sink and tx:
+            try:
+                self._xchain_sink(leader, sig, tx)
+            except Exception as e:
+                log.debug("xchain sink: %s", e)
 
     def _event(self, leader: str, sig: str, kind: str, token: str = "", sol: float | None = None, detail: str = ""):
         """Record why a leader transaction did NOT become a signal (queryable later)."""
@@ -690,6 +702,7 @@ class SolanaAdapter(ChainAdapter):
                 self._event(mentioned, sig, "not_signer",
                             detail="leader in tx but did not sign (platform/smart wallet, "
                                    "transfer to him, or someone else's tx)")
+                self._xchain(mentioned, sig, tx)          # e.g. Relay solver paying out his EVM sale
 
     async def _recover(self, sig: str, res: dict, leaders: set, queue: asyncio.Queue, notified: float):
         """A stream notification without a usable transaction. Log it, record a 'tx_error' leader
@@ -749,6 +762,7 @@ class SolanaAdapter(ChainAdapter):
         keys = (tx or {}).get("transaction", {}).get("message", {}).get("accountKeys", [])
         if not any(isinstance(k, dict) and k.get("pubkey") == leader and k.get("signer") for k in keys):
             self._event(leader, sig, "not_signer" if tx else "tx_not_found")
+            self._xchain(leader, sig, tx)
             return   # leader didn't sign: airdrop, fee payout, or account created by someone else
         parsed = parse_wallet_swap(tx, leader)
         if parsed:
@@ -758,6 +772,7 @@ class SolanaAdapter(ChainAdapter):
             if not stable:
                 log.info("leader %s tx not recognised as swap: %s", leader[:6], sig)
                 self._event(leader, sig, "not_a_swap", detail=venues_in_tx(tx))
+                self._xchain(leader, sig, tx)              # e.g. Relay deposit = cross-chain buy
                 return
             side, mint, amount, usd = stable
             try:

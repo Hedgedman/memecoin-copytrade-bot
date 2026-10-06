@@ -31,6 +31,14 @@ class Store:
             token TEXT, sol REAL, detail TEXT);
         CREATE INDEX IF NOT EXISTS leader_events_leader ON leader_events(leader, ts);
         CREATE INDEX IF NOT EXISTS pool_factors_token ON pool_factors(token, ts);
+        CREATE TABLE IF NOT EXISTS xchain_trades(
+            request_id TEXT PRIMARY KEY, ts REAL, leader TEXT, evm_address TEXT, side TEXT,
+            chain TEXT, chain_id INTEGER, token TEXT, symbol TEXT, decimals INTEGER,
+            token_amount TEXT, usd REAL, his_price_usd REAL, status TEXT,
+            deposit_tx TEXT, deposit_ts REAL, fill_tx TEXT, fill_ts REAL, detected_via TEXT,
+            price_later_ts REAL, price_later_usd REAL, price_later_impact_pct REAL,
+            price_later_out_usd REAL, raw TEXT);
+        CREATE INDEX IF NOT EXISTS xchain_trades_leader ON xchain_trades(leader, ts);
         """)
         self.db.commit()
         for table, col, typ in (("signals", "venues", "TEXT"), ("positions", "ref_value", "REAL"),
@@ -76,6 +84,39 @@ class Store:
         """A leader tx that did NOT become a signal, and why (small_buy, not_a_swap, not_signer...)."""
         self.db.execute("INSERT INTO leader_events VALUES(?,?,?,?,?,?,?)", (ts, leader, sig, kind, token, sol, detail))
         self.db.commit()
+
+    def record_xtrade(self, t, leader: str, evm: str, via: str) -> bool:
+        """A leader's cross-chain trade (bot/xchain). False if this Relay request is already stored.
+        Also logged in `signals` (quote_amount = USD, not SOL) so why.py & co. see it."""
+        cur = self.db.execute(
+            "INSERT OR IGNORE INTO xchain_trades(request_id,ts,leader,evm_address,side,chain,chain_id,token,"
+            "symbol,decimals,token_amount,usd,his_price_usd,status,deposit_tx,deposit_ts,fill_tx,fill_ts,"
+            "detected_via,raw) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (t.request_id, time.time(), leader, evm, t.side, t.chain, t.chain_id, t.token, t.symbol,
+             t.decimals, str(t.token_amount), t.usd, t.price_usd, t.status, t.deposit_tx, t.deposit_ts,
+             t.fill_tx, t.fill_ts, via, json.dumps(t.raw)))
+        if cur.rowcount == 0:
+            return False
+        sig = t.deposit_tx if t.side == "buy" else (t.fill_tx or t.request_id)
+        self.db.execute("INSERT INTO signals(ts,chain,leader,side,token,token_amount,quote_amount,signature,"
+                        "block_time,action,reason,venues) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (time.time(), t.chain, leader, t.side, t.token, str(t.token_amount), t.usd, sig,
+                         int(t.deposit_ts) if t.deposit_ts else None, f"xchain_{t.side}",
+                         f"watch-only {t.status}: {t.token_ui:,.6g} {t.symbol} for ${t.usd:,.2f} "
+                         f"(USD, his price ${t.price_usd or 0:.6g})", "relay"))
+        self.db.commit()
+        return True
+
+    def set_xprice(self, request_id: str, ts: float, price, impact, out_usd):
+        """Relay /price ~15 s after his trade: what we would have paid/received (USD per token)."""
+        self.db.execute("UPDATE xchain_trades SET price_later_ts=?, price_later_usd=?, price_later_impact_pct=?,"
+                        " price_later_out_usd=? WHERE request_id=?", (ts, price, impact, out_usd, request_id))
+        self.db.commit()
+
+    def xtrade_count_from(self, evm: str, chain: str, since: float) -> int:
+        """Relay requests that started on `chain` from `evm` (his sells there) since `since`."""
+        return self.db.execute("SELECT COUNT(*) FROM xchain_trades WHERE evm_address=? AND chain=? "
+                               "AND side='sell' AND deposit_ts>=?", (evm, chain, since)).fetchone()[0]
 
     def record_factor(self, token: str, ts: float, factor: float):
         """Calibration of a pool price against Jupiter (real value / pool-model value)."""
