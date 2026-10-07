@@ -148,7 +148,9 @@ class Bot:
                 asyncio.create_task(self.handle_buy(s))
             else:
                 self.store.log_signal(s, "leader_sell")
-                asyncio.create_task(self.pm.on_leader_sell(s.chain, s.leader, s.token))
+                # share of his holding he sold (pre-balance from his sell tx); unknown -> treat as all
+                frac = min(1.0, s.token_amount / s.leader_pre_amount) if s.leader_pre_amount > 0 else 1.0
+                asyncio.create_task(self.pm.on_leader_sell(s.chain, s.leader, s.token, frac))
 
     async def run(self):
         for a in self.adapters.values():

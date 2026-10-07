@@ -7,6 +7,11 @@ Usage (from the copybot folder):
     python whatif_ticks.py --from-id 44 --max-mc 500000              # only entries below $500k market cap
     python whatif_ticks.py --from-id 44 --min-mc 500000              # only entries at/above $500k
     python whatif_ticksv2.py --live --leader-sl 0.4                  # leader-exit style, -40% safety stop
+    python whatif_ticksv2.py --from-id 230 --no-exclude-profiles     # include positions of leader profiles
+
+Positions opened under a leader profile (bot/profiles.py, timing["profile"]) are EXCLUDED by default: they
+ran other exits and sizes, so they would pollute a hypothesis on the global exits. The excluded ones are
+listed (id, leader, profile). --profile NAME looks at one profile only ('default' = positions without one).
 
 Exit styles compared
   fixed     sell everything at +TP, or at the stop                (what the bot does now)
@@ -108,13 +113,25 @@ def profile_of(timing) -> str:
     return json.loads(timing or "{}").get("profile") or "default"
 
 
-def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile=""):
+def keep_profile(timing, profile: str = "", exclude_profiles: bool = False) -> bool:
+    """--profile NAME keeps only that profile ('default' = none); otherwise --exclude-profiles drops every
+    position opened under a leader profile, so a hypothesis on the global exits is judged on its own trades."""
+    prof = profile_of(timing)
+    if profile:
+        return prof == profile
+    return not (exclude_profiles and prof != "default")
+
+
+def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile="",
+         exclude_profiles=False):
+    """-> (positions, skipped, mc_out, excluded): excluded = [(id, leader, profile)] dropped by the profile filter."""
     # read-only, so it is safe to point --db at the live bot's database while it runs
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
     rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader, timing FROM positions WHERE paper=? "
                       "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
-    rows = [r[:6] for r in rows if not profile or profile_of(r[6]) == profile]
+    excluded = [(r[0], r[5], profile_of(r[6])) for r in rows if not keep_profile(r[6], profile, exclude_profiles)]
+    rows = [r[:6] for r in rows if keep_profile(r[6], profile, exclude_profiles)]
     out, skipped, mc_out = [], 0, 0
     for pid, token, amount, cost, opened, leader in rows:
         if min_mc is not None or max_mc is not None:
@@ -167,7 +184,7 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
         entry = int((cost - paper_fee) * L)
         out.append(Pos(pid, cost, int(amount), entry * (10_000 - fee0) // 10_000, series,
                        leader_exit=leader_exit_ts(db, token, leader, opened)))
-    return out, skipped, mc_out
+    return out, skipped, mc_out, excluded
 
 
 def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee: float,
@@ -278,17 +295,18 @@ def venue_class(timing: dict, pos: "Pos | None") -> str:
     return "jupiter" if venue in ("jupiter", "live", "") else "vault"
 
 
-def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard,
-                profile=""):
-    """Report-only: actual results and the what-if per pricing class (pool / vault / Jupiter)."""
+def venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile="", exclude_profiles=False):
+    """Closed positions per pricing class: {class: [(id, cost, exit_value, exit_reason)]}, and the ones the
+    profile filter dropped: [(id, leader, profile)]. Same filters as load()."""
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
     by_id = {p.pid: p for p in data}
-    groups = {c: [] for c, _ in VENUE_CLASSES}
+    groups, excluded = {c: [] for c, _ in VENUE_CLASSES}, []
     for pid, token, leader, cost, exitv, opened, reason, timing in db.execute(
             "SELECT id, token, leader, cost, exit_value, opened_at, exit_reason, timing FROM positions WHERE paper=? "
             "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)):
-        if profile and profile_of(timing) != profile:
+        if not keep_profile(timing, profile, exclude_profiles):
+            excluded.append((pid, leader, profile_of(timing)))
             continue
         if min_mc is not None or max_mc is not None:
             mc = entry_mc(db, token, leader, opened)
@@ -296,6 +314,14 @@ def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee
                 continue
         t = json.loads(timing or "{}")
         groups[venue_class(t, by_id.get(pid))].append((pid, cost, exitv, reason))
+    return groups, excluded
+
+
+def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard,
+                profile="", exclude_profiles=False):
+    """Report-only: actual results and the what-if per pricing class (pool / vault / Jupiter)."""
+    by_id = {p.pid: p for p in data}
+    groups, _ = venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile, exclude_profiles)
     print("\nVENUE SPLIT (report only): ACTUAL closed results per pricing class, and the what-if where replayable")
     hdr = f"  {'class':<8} {'n':>3} {'wins':>5} {'PnL SOL':>8} {'avg %':>6} {'median %':>8} {'stop fill med':>13}"
     print(hdr + "".join(f"{lbl[:22]:>24}" for lbl, _ in styles))
@@ -365,6 +391,8 @@ def main():
     ap.add_argument("--min-mc", type=float, default=None, help="only positions entered at >= this market cap (USD)")
     ap.add_argument("--max-mc", type=float, default=None, help="only positions entered below this market cap (USD)")
     ap.add_argument("--profile", default="", help="only positions opened under this leader profile ('default' = none)")
+    ap.add_argument("--exclude-profiles", action=argparse.BooleanOptionalAction, default=True,
+                    help="drop positions opened under any leader profile (default on; ignored with --profile)")
     ap.add_argument("--leader-sl", type=float, default=None,
                     help="extra safety-stop row for the leader-exit style, e.g. 0.4 (rows always include off/20/30/40/60%%)")
     args = ap.parse_args()
@@ -385,10 +413,18 @@ def main():
     sl = args.sl if args.sl is not None else float(ex.get("stop_loss", 0.10))
     basis = ex.get("stop_basis", "cost")
 
-    data, skipped, mc_out = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
-                                 args.max_after, args.min_mc, args.max_mc, args.live, args.profile)
+    excl = args.exclude_profiles and not args.profile
+    data, skipped, mc_out, excluded = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
+                                           args.max_after, args.min_mc, args.max_mc, args.live, args.profile, excl)
     if args.profile:
         print(f"profile filter: {args.profile}")
+    elif excl:
+        print(f"leader-profile positions excluded: {len(excluded)}"
+              + (" (--no-exclude-profiles to include them)" if excluded else ""))
+        for pid, leader, prof in excluded:
+            print(f"  #{pid:<5} {leader[:8]}  {prof}")
+    else:
+        print("leader-profile positions INCLUDED (--exclude-profiles to drop them)")
     if args.live:
         print("LIVE positions (real fills; pool prices scaled with each position's first real mark)")
     n = len(data)
@@ -484,7 +520,7 @@ def main():
     venue_split(args.db, args.from_id, args.live, data, args.min_mc, args.max_mc,
                 [("config exits", cur), ("fixed TP +30% / SL -20%", ("fixed", 0.30, 0, 0.20)),
                  ("trail 30%/+50% SL -20%", ("trailing", 0.50, 0.30, 0.20))],
-                delay, fee, basis, args.part, args.confirm, args.hard, args.profile)
+                delay, fee, basis, args.part, args.confirm, args.hard, args.profile, excl)
 
     print(f"\n{len(allres)} settings tested on {n} trades: the best one is partly luck (overfitting).")
     print("Before changing the bot: check the same setting is also good on LATER trades (--from-id).")

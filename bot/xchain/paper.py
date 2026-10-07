@@ -20,10 +20,13 @@ Storage   positions (chain robinhood/bsc, paper=1, cost/exit_value in USD), mark
           Position.timing holds the running state: remaining, realized_usd, basis_usd, bought_usd,
           his_bought/his_sold, evm, symbol, decimals, chain_id.
           xchain_fills also hold leader + detect_delay_s (how late we saw his trade).
-Profiles  a leader with a profile (bot/profiles.py, mode "trail"): size = factor x his USD, own cap per token
-          (incl. his adds) and minimum; his Relay/DEX sells are NOT followed; every profile mark_interval_s
+Profiles  a leader with a profile (bot/profiles.py): size = factor x his USD, own cap per token (incl. his
+          adds) and minimum. Mode "trail": his Relay/DEX sells are NOT followed; every profile mark_interval_s
           a Relay quote checks the trail (peak of the remaining value, active once +trailing_activate) and
           the stop-loss before that. An add lifts the peak by its cost. Exits: trailing_stop / stop_loss.
+          Mode "mirror": his sells are mirrored pro rata like the default leaders; the profile's stop_loss
+          replaces the global safety_stop. The exits stored in the position decide, so positions opened
+          before a profile existed keep their rules.
 EVM RPC   per chain: the configured URL (env, e.g. Alchemy), the public URL as fallback.
 """
 from __future__ import annotations
@@ -177,7 +180,7 @@ class XchainPaperTrader:
                         "evm": evm, "remaining": str(q.out_raw), "realized_usd": 0.0, "basis_usd": cost,
                         "bought_usd": size, "his_bought": str(t.token_amount), "his_sold": "0"})
                     if prof is not None:
-                        p.timing.update(prof.stamp(), peak_value=cost)
+                        p.timing.update(prof.stamp(), **({} if prof.mirrors else {"peak_value": cost}))
                     p.id = self.store.open_position(p)
                     self.positions[key] = p
                     kind = "open"
@@ -308,9 +311,11 @@ class XchainPaperTrader:
                              p.timing.get("symbol"), p.timing.get("profile"), value_rem, basis,
                              100 * (value_rem / basis - 1))
                     self._spawn(self._stop(p, time.time(), "stop_loss"))
-            elif value_rem <= (1 - self.stop) * basis:
-                log.warning("xchain SAFETY STOP %s %s: remaining worth $%.2f vs cost $%.2f (%+.0f%%)",
-                            p.chain, p.timing.get("symbol"), value_rem, basis, 100 * (value_rem / basis - 1))
+            elif value_rem <= (1 - float((exits or {}).get("stop_loss", self.stop))) * basis:
+                log.warning("xchain SAFETY STOP %s %s%s: remaining worth $%.2f vs cost $%.2f (%+.0f%%)",
+                            p.chain, p.timing.get("symbol"),
+                            f" ({p.timing['profile']})" if p.timing.get("profile") else "",
+                            value_rem, basis, 100 * (value_rem / basis - 1))
                 self._spawn(self._stop(p, time.time()))
 
     async def _stop(self, p: Position, triggered_at: float, reason: str = "safety_stop"):
@@ -488,8 +493,9 @@ class XchainPaperTrader:
         for p in self.positions.values():                         # first marks ~10 s after start
             p.last_mark_at = time.time() - self._mark_interval(p) + 10
         for leader, prof in self.profiles.items():
-            log.info("xchain profile %s for %s: own trail/stop, his sells not followed, marks every %.0fs",
-                     prof.name, leader[:8], prof.mark_interval_s)
+            log.info("xchain profile %s for %s: %s, marks every %.0fs", prof.name, leader[:8],
+                     f"his sells mirrored pro rata, safety stop -{100 * prof.stop_loss:.0f}%" if prof.mirrors
+                     else "own trail/stop, his sells not followed", prof.mark_interval_s)
         while True:
             try:
                 await self.logs_once()

@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from .models import Position
 from .store import Store
 from .chains.base import RateLimited
@@ -62,11 +63,44 @@ class PositionManager:
             if p.status == "open" and p.chain == chain and p.token == token and id(p) not in self._checking:
                 asyncio.ensure_future(self._check(p))
 
-    async def on_leader_sell(self, chain: str, leader: str, token: str):
+    async def on_leader_sell(self, chain: str, leader: str, token: str, fraction: float = 1.0):
+        """fraction = the share of HIS holding he sold (1.0 = all). A position with a mirror profile
+        (bot/profiles.py) sells the same share of ours; any other position that follows the leader closes."""
         for p in self.open():
             if p.chain == chain and p.token == token and p.leader == leader and p.status == "open" \
                     and self._exits(p)[5]:
-                await self.close(p, "leader_sold")
+                if (p.timing.get("exits") or {}).get("mode") == "mirror" and fraction < 0.99:
+                    await self.partial_sell(p, fraction, "leader_sold")
+                else:
+                    await self.close(p, "leader_sold")
+
+    async def partial_sell(self, p: Position, fraction: float, reason: str):
+        """Sell `fraction` of what we still hold. The proceeds accumulate in timing["realized"] (native units),
+        so marks, stops and the final PnL keep comparing the WHOLE position with its cost."""
+        amount = int(p.token_amount * fraction)
+        if p.status != "open" or amount <= 0:
+            return
+        p.status = "closing"
+        a = self.adapters[p.chain]
+        fill = None
+        for attempt in range(3):                      # his sell comes once: don't lose it to a rate limit
+            fill = await a.sell(replace(p, token_amount=amount), None)
+            if fill.ok:
+                break
+            await asyncio.sleep(2.0)
+        if not fill.ok:
+            p.status = "open"
+            log.error("PARTIAL SELL FAILED %s (%s): %s", p.token, reason, fill.error)
+            return
+        p.timing.setdefault("initial_amount", p.token_amount)
+        p.token_amount -= amount
+        p.timing["realized"] = float(p.timing.get("realized", 0.0)) + fill.quote_amount
+        p.timing["partial_sells"] = int(p.timing.get("partial_sells", 0)) + 1
+        p.status = "open"
+        self.store.update_position(p)
+        log.info("PARTIAL SELL %s reason=%s sold %.1f%% of what we held for %.4f | realized %.4f of cost %.4f, "
+                 "%.1f%% of the position left", p.token, reason, 100 * fraction, fill.quote_amount,
+                 p.timing["realized"], p.cost, 100 * p.token_amount / int(p.timing["initial_amount"]))
 
     async def close(self, p: Position, reason: str, trigger_value: float | None = None):
         if p.status != "open":
@@ -85,7 +119,8 @@ class PositionManager:
             p.status = "open"
             log.error("SELL FAILED %s (%s) attempt %d: %s", p.token, reason, p.sell_attempts, fill.error)
             return
-        p.status, p.exit_value, p.closed_at = "closed", fill.quote_amount, time.time()
+        p.status, p.closed_at = "closed", time.time()
+        p.exit_value = float(p.timing.get("realized", 0.0)) + fill.quote_amount   # + earlier partial sells
         p.exit_reason, p.exit_sig = reason, fill.signature
         p.timing.update(exit_filled_at=p.closed_at, exit_fill_slot=fill.slot, exit_model=fill.model)
         self.store.close_position(p)
@@ -126,15 +161,19 @@ class PositionManager:
             return
         p.quote_failures = 0
         now = time.time()
+        # after partial sells (mirror profile): `value` is the rest; held = share of the position still held,
+        # total = rest + realized, comparable with cost. Untouched positions: held 1, realized 0.
+        held = p.token_amount / int(p.timing.get("initial_amount") or p.token_amount)
+        total = float(p.timing.get("realized", 0.0)) + value
         if now - p.last_mark_at >= self.mark_interval:
-            self.store.mark(p, value)
+            self.store.mark(p, total)
             p.last_mark_at = now
         if p.ref_value is None:
-            p.ref_value = value          # first exit quote after buying = our "entry price"
+            p.ref_value = value / held   # first exit quote after buying = our "entry price" (whole position)
             self.store.set_ref(p)        # saved, so a restart keeps the same stop level
-        p.peak_value = value if p.peak_value is None else max(p.peak_value, value)
-        ret = value / p.cost - 1
-        stop_ret = value / p.ref_value - 1 if self.stop_basis == "entry_price" else ret
+        p.peak_value = total if p.peak_value is None else max(p.peak_value, total)
+        ret = total / p.cost - 1
+        stop_ret = value / (p.ref_value if self.stop_basis == "entry_price" else p.cost) / held - 1
         trailing_on = trail_pct > 0 and p.peak_value / p.cost - 1 >= trail_act
         if tp > 0 and ret >= tp:
             await self.close(p, "take_profit", value)

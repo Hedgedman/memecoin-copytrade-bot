@@ -8,3 +8,4 @@ __pycache__/
 backup/
 bot/chains/solana_backup*.py
 data/
+backtests/

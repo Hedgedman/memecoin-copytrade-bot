@@ -168,7 +168,8 @@ class Store:
                                     (tx_hash.lower(),)).fetchone())
 
     def update_position(self, p: Position):
-        """Paper xchain position after an add-on buy or a partial sell (amount, cost, timing JSON)."""
+        """Position after an add-on buy or a partial sell (amount, cost, timing JSON): xchain paper, and
+        Solana positions of a mirror profile (PositionManager.partial_sell)."""
         self.db.execute("UPDATE positions SET token_amount=?, cost=?, timing=? WHERE id=?",
                         (str(p.token_amount), p.cost, json.dumps(p.timing), p.id))
         self.db.commit()
