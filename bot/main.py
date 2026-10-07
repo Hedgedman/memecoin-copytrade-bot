@@ -10,6 +10,7 @@ from .chains.evm import EvmAdapter
 from .chains.solana import SolanaAdapter
 from .models import Position, Signal
 from .positions import PositionManager
+from .profiles import load_profiles
 from .risk import RiskManager
 from .store import Store
 from .xchain.paper import XchainPaperTrader
@@ -38,6 +39,7 @@ class Bot:
         self.chain_cfg = {n: cfg["chains"][n] for n in self.adapters}
         self.pm = PositionManager(cfg["exits"], self.adapters, self.store)
         self.risk = RiskManager(cfg["risk"], self.store, self.paper)
+        self.profiles = load_profiles(cfg, self.paper)          # per-leader exits + sizing (paper only)
         self.in_flight: set[tuple[str, str]] = set()
         self.queue: asyncio.Queue = asyncio.Queue()
         for name, a in self.adapters.items():
@@ -56,7 +58,8 @@ class Bot:
             if pt.get("enabled"):                              # simulated fills only, own limits
                 if self.paper:
                     self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, self.xchain.sol_leaders,
-                                                           cfg["risk"].get("kill_switch_file", "STOP"))
+                                                           cfg["risk"].get("kill_switch_file", "STOP"),
+                                                           profiles=self.profiles)
                 else:
                     log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")
 
@@ -90,6 +93,20 @@ class Bot:
         try:
             adapter = self.adapters[s.chain]
             size = float(ccfg["buy_amount"])
+            prof = self.profiles.get(s.leader) if s.chain == "solana" else None
+            if prof is not None:
+                # proportional: his USD size x factor (s.quote_amount is SOL, also for his USDC buys)
+                try:
+                    sol_usd = await adapter.sol_usd()
+                except Exception as e:
+                    self._skip(s, f"profile {prof.name}: SOL price unavailable ({type(e).__name__})")
+                    return
+                usd, why = prof.size_usd(s.quote_amount * sol_usd)
+                if why:
+                    self._skip(s, why)
+                    return
+                size = usd / sol_usd
+                timing.update(prof.stamp(), his_usd=round(s.quote_amount * sol_usd, 2), our_usd=round(usd, 2))
             ok, why = await adapter.pre_trade_check(s.token, size)
             timing["checked_at"] = time.time()
             if not ok:

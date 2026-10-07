@@ -20,6 +20,10 @@ Storage   positions (chain robinhood/bsc, paper=1, cost/exit_value in USD), mark
           Position.timing holds the running state: remaining, realized_usd, basis_usd, bought_usd,
           his_bought/his_sold, evm, symbol, decimals, chain_id.
           xchain_fills also hold leader + detect_delay_s (how late we saw his trade).
+Profiles  a leader with a profile (bot/profiles.py, mode "trail"): size = factor x his USD, own cap per token
+          (incl. his adds) and minimum; his Relay/DEX sells are NOT followed; every profile mark_interval_s
+          a Relay quote checks the trail (peak of the remaining value, active once +trailing_activate) and
+          the stop-loss before that. An add lifts the peak by its cost. Exits: trailing_stop / stop_loss.
 EVM RPC   per chain: the configured URL (env, e.g. Alchemy), the public URL as fallback.
 """
 from __future__ import annotations
@@ -40,11 +44,12 @@ pad_addr = lambda a: "0x" + "0" * 24 + a.lower()[2:]
 
 
 class XchainPaperTrader:
-    def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP"):
+    def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP", profiles=None):
         if not paper:
             raise ValueError("xchain trading is paper-only (no execution exists): set paper: true")
         self.store = store
         self.leaders = set(leaders)                                          # Solana leader wallets
+        self.profiles = dict(profiles or {})                                 # leader -> Profile (bot/profiles.py)
         self.chains = set(cfg.get("chains", ["robinhood", "bsc"]))
         self.mult = float(cfg.get("size_mult", 0.4))
         self.cap = float(cfg.get("max_usd_per_token", 2000))
@@ -85,6 +90,14 @@ class XchainPaperTrader:
         if t.side == "buy":
             self._spawn(self._buy(t, leader, evm, detected_at))
         elif t.side == "sell":
+            # decided by the exits stored in OUR position, so positions opened before a profile existed
+            # keep mirroring his sells
+            p = next((q for k, q in self.positions.items()
+                      if k[0] == t.chain and k[1].lower() == t.token.lower() and k[2] == leader), None)
+            if p is not None and (p.timing.get("exits") or {}).get("mode") == "trail":   # we exit ourselves
+                log.info("xchain %s sold %s on %s: not followed (profile %s exits on its own trail/stop)",
+                         leader[:8], t.symbol, t.chain, p.timing.get("profile"))
+                return
             his = {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd, "his_price_usd": t.price_usd,
                    "detected_at": detected_at}
             self._spawn(self._mirror_sell(t.chain, t.token, leader, evm, t.token_amount, detected_at,
@@ -116,12 +129,17 @@ class XchainPaperTrader:
             if p is not None:                                    # his holding, for the no-RPC fallback
                 p.timing["his_bought"] = str(int(p.timing.get("his_bought", "0")) + t.token_amount)
             age = detected_at - (t.deposit_ts or detected_at)
-            target = self.mult * t.usd
+            prof = self.profiles.get(leader)
+            target = (prof.factor if prof else self.mult) * t.usd
             tkey = (t.chain, t.token.lower())
             in_token = self._reserved[tkey] + sum(              # all leaders together, incl. buys in flight
                 q.timing["bought_usd"] for (c, tk, _), q in self.positions.items()
                 if c == t.chain and tk.lower() == tkey[1])
             size = min(target, self.cap - in_token)
+            prof_why = None
+            if prof is not None:                                 # own cap per token (incl. his adds) + minimum
+                own, prof_why = prof.size_usd(t.usd, p.timing["bought_usd"] if p else 0.0)
+                size = min(size, own)
             n_leader = sum(k[2] == leader for k in list(self.positions) + list(self._opening))
             why = None
             if age > self.max_age:
@@ -132,8 +150,10 @@ class XchainPaperTrader:
                 why = f"max open xchain positions ({self.max_open})"
             elif p is None and n_leader >= self.max_per_leader:
                 why = f"max open xchain positions per leader ({self.max_per_leader})"
-            elif size < self.min_usd:
-                why = (f"cap ${self.cap:,.0f}/token reached" if target >= self.min_usd
+            elif prof_why:
+                why = prof_why
+            elif size < (prof.min_usd if prof else self.min_usd):
+                why = (f"cap ${self.cap:,.0f}/token reached" if target >= self.min_usd or prof
                        else f"our size ${target:,.2f} < ${self.min_usd:,.0f}")
             if why:
                 self._skip(t, leader, why)
@@ -156,6 +176,8 @@ class XchainPaperTrader:
                         "xchain": 1, "symbol": t.symbol, "decimals": t.decimals, "chain_id": t.chain_id,
                         "evm": evm, "remaining": str(q.out_raw), "realized_usd": 0.0, "basis_usd": cost,
                         "bought_usd": size, "his_bought": str(t.token_amount), "his_sold": "0"})
+                    if prof is not None:
+                        p.timing.update(prof.stamp(), peak_value=cost)
                     p.id = self.store.open_position(p)
                     self.positions[key] = p
                     kind = "open"
@@ -165,6 +187,8 @@ class XchainPaperTrader:
                     p.timing["remaining"] = str(int(p.timing["remaining"]) + q.out_raw)
                     p.timing["basis_usd"] += cost
                     p.timing["bought_usd"] += size
+                    if "peak_value" in p.timing:                 # trail: the add's cost lifts the peak too,
+                        p.timing["peak_value"] += cost           # so adding at a higher price can't trip it
                     self.store.update_position(p)
                     kind = "add"
             finally:
@@ -244,11 +268,21 @@ class XchainPaperTrader:
                      p.timing.get("symbol"), reason, pnl, 100 * pnl / p.cost, (now - p.opened_at) / 3600)
         return True
 
-    # ---------- marks + safety stop ----------
-    async def mark_once(self):
+    # ---------- marks + safety stop / profile trail ----------
+    def _mark_interval(self, p: Position) -> float:
+        prof = self.profiles.get(p.leader)
+        return prof.mark_interval_s if prof is not None and p.timing.get("profile") == prof.name else self.mark_s
+
+    async def mark_once(self, due_only: bool = False):
+        """Relay quote for each position's remaining tokens -> mark + exit checks. due_only: only positions
+        whose own mark interval has passed (profile positions are marked more often)."""
+        now = time.time()
         for p in list(self.positions.values()):
             if self.locks[(p.chain, p.token, p.leader)].locked():
                 continue                                         # a buy/sell is in progress
+            if due_only and now - p.last_mark_at < self._mark_interval(p):
+                continue
+            p.last_mark_at = now
             rem = int(p.timing["remaining"])
             q = await self._quote("sell", p.leader, p.timing["evm"], int(p.timing["chain_id"]), p.token, rem,
                                   priority=2)
@@ -256,18 +290,35 @@ class XchainPaperTrader:
                 continue
             value_rem = q.out_ui - q.gas_usd
             self.store.mark(p, p.timing["realized_usd"] + value_rem)
-            if value_rem <= (1 - self.stop) * p.timing["basis_usd"]:
+            basis = p.timing["basis_usd"]
+            exits = p.timing.get("exits")
+            if exits and exits.get("mode") == "trail":           # leader profile: we exit ourselves
+                peak = max(p.timing.get("peak_value", basis), value_rem)
+                if peak != p.timing.get("peak_value"):
+                    p.timing["peak_value"] = peak
+                    self.store.update_position(p)
+                active = peak >= basis * (1 + float(exits["trailing_activate"]))
+                if active and value_rem <= peak * (1 - float(exits["trailing_pct"])):
+                    log.info("xchain TRAIL %s %s (%s): $%.2f is %.0f%% below its peak $%.2f (cost $%.2f)", p.chain,
+                             p.timing.get("symbol"), p.timing.get("profile"), value_rem, 100 * (1 - value_rem / peak),
+                             peak, basis)
+                    self._spawn(self._stop(p, time.time(), "trailing_stop"))
+                elif not active and value_rem <= basis * (1 - float(exits["stop_loss"])):
+                    log.info("xchain STOP %s %s (%s): remaining worth $%.2f vs cost $%.2f (%+.0f%%)", p.chain,
+                             p.timing.get("symbol"), p.timing.get("profile"), value_rem, basis,
+                             100 * (value_rem / basis - 1))
+                    self._spawn(self._stop(p, time.time(), "stop_loss"))
+            elif value_rem <= (1 - self.stop) * basis:
                 log.warning("xchain SAFETY STOP %s %s: remaining worth $%.2f vs cost $%.2f (%+.0f%%)",
-                            p.chain, p.timing.get("symbol"), value_rem, p.timing["basis_usd"],
-                            100 * (value_rem / p.timing["basis_usd"] - 1))
+                            p.chain, p.timing.get("symbol"), value_rem, basis, 100 * (value_rem / basis - 1))
                 self._spawn(self._stop(p, time.time()))
 
-    async def _stop(self, p: Position, triggered_at: float):
+    async def _stop(self, p: Position, triggered_at: float, reason: str = "safety_stop"):
         async with self.locks[(p.chain, p.token, p.leader)]:
             if (p.chain, p.token, p.leader) not in self.positions:
                 return
             await self._sleep_until(triggered_at + self.delay)
-            await self._sell(p, int(p.timing["remaining"]), "safety_stop", 1.0, {})
+            await self._sell(p, int(p.timing["remaining"]), reason, 1.0, {})
 
     # ---------- DEX sells (ERC-20 Transfer logs out of his EVM address) ----------
     async def logs_once(self):
@@ -289,7 +340,7 @@ class XchainPaperTrader:
                     logs = head
                     continue
                 latest = int(head, 16) - self.head_lag
-                frm = max(self._last_block.get(chain, latest - self.max_span) + 1, latest - self.max_span)
+                frm = max(self._last_block.get(chain, latest - self.max_span) + 1, latest - self.max_span, 0)
                 if frm > latest:
                     logs = []
                     break
@@ -350,6 +401,10 @@ class XchainPaperTrader:
         blk = await self._rpc(chain, "eth_getBlockByNumber", [lg["blockNumber"], False])
         his_ts = int(blk["timestamp"], 16) if isinstance(blk, dict) and blk.get("timestamp") else None
         for p in held:
+            if (p.timing.get("exits") or {}).get("mode") == "trail":
+                log.info("xchain DEX sell by %s (%s) on %s: not followed (profile %s)", evm[:10], p.leader[:8],
+                         chain, p.timing.get("profile"))
+                continue
             log.info("xchain DEX sell by %s (%s) on %s: %s raw %s (tx %s)", evm[:10], p.leader[:8], chain, amount,
                      p.timing.get("symbol"), tx[:12])
             self.store.record_event(time.time(), p.leader, tx, "xchain_dex_sell", p.token, None,
@@ -430,13 +485,15 @@ class XchainPaperTrader:
                  sorted(self.chains), len(self.leaders), self.mult, self.cap, self.min_usd, self.delay,
                  self.stop * 100, self.max_open, self.max_per_leader, len(self.positions),
                  [c for c in sorted(self.chains) if self.rpc.get(c) or self.rpc_fallback.get(c)] or "none")
-        next_mark = time.time() + min(self.mark_s, 10)
+        for p in self.positions.values():                         # first marks ~10 s after start
+            p.last_mark_at = time.time() - self._mark_interval(p) + 10
+        for leader, prof in self.profiles.items():
+            log.info("xchain profile %s for %s: own trail/stop, his sells not followed, marks every %.0fs",
+                     prof.name, leader[:8], prof.mark_interval_s)
         while True:
             try:
                 await self.logs_once()
-                if time.time() >= next_mark:
-                    next_mark = time.time() + self.mark_s
-                    await self.mark_once()
+                await self.mark_once(due_only=True)                  # each position on its own interval
             except Exception as e:
                 log.warning("xchain paper loop error: %s", e)
             await asyncio.sleep(self.logs_s)

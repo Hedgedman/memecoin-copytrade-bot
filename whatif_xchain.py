@@ -1,6 +1,11 @@
 """What-if for cross-chain PAPER positions (robinhood / bsc), on the bot's own data. Read-only.
 
-    python whatif_xchain.py [--db copybot.db] [--from-id N] [--leader PREFIX] [--chain bsc] [--list]
+    python whatif_xchain.py [--db copybot.db] [--from-id N] [--leader PREFIX] [--chain bsc] [--profile NAME] [--list]
+
+Profiles: positions opened under a leader profile (bot/profiles.py) carry timing["profile"]; the others are
+"default". --profile default / trail_Leader-B selects one; the per-leader table splits by it. A trail profile
+does not mirror his sells: its own trailing_stop / stop_loss sells are replayed as price points (like
+safety_stop), so for those positions "actual" is the result that matters, not the mirror replay.
 
 Entry-gap filter (report only): what if we had skipped a copy when our entry price was already more than
 X% above his (X = 10/20/40%)? Decided on the opening fill; add-ons of kept positions stay as they were.
@@ -18,26 +23,32 @@ and counted as censored (c). The real bot uses a -60% stop, so looser stops are 
 Amounts in USD. Buys (incl. add-ons) are the same as the real ones in every variant.
 """
 import argparse
+import json
 import os
 import sqlite3
 
 STOPS = (None, 0.40, 0.50, 0.60, 0.70)
 STYLES = ("mirror", "first_sell", "hold")
+OWN_EXITS = ("safety_stop", "trailing_stop", "stop_loss")      # our own sells, not his trades
 
 
-def load(db, from_id, leader="", chain=""):
+def load(db, from_id, leader="", chain="", profile=""):
+    """-> [(pid, chain, cost, exit_value, status, events, leader, profile)]"""
     out = []
     for pid, chain, cost, exitv, status, timing, who in db.execute(
             "SELECT id, chain, cost, exit_value, status, timing, leader FROM positions WHERE paper=1 "
             "AND chain!='solana' AND id>=? AND leader LIKE ? AND chain LIKE ? ORDER BY id",
             (from_id, leader + "%", chain or "%")):
+        prof = json.loads(timing or "{}").get("profile") or "default"
+        if profile and prof != profile:
+            continue
         rows = db.execute("SELECT ts, side, fraction, our_usd, our_tokens, reason FROM xchain_fills "
                           "WHERE position_id=? ORDER BY ts", (pid,)).fetchall()
         if not rows:
             continue
         fills = [r[:5] for r in rows]
-        # our own safety-stop sells are not his trades: replay them only as a price point
-        ev = [(ts, "mark", None, None, usd / int(tok), None) if "safety_stop" in (reason or "") else
+        # our own exits (safety stop, profile trail/stop) are not his trades: replay them only as a price point
+        ev = [(ts, "mark", None, None, usd / int(tok), None) if any(x in (reason or "") for x in OWN_EXITS) else
               (ts, "fill", side, frac, usd, int(tok)) for ts, side, frac, usd, tok, reason in rows]
         # marks hold realized + value of the remaining tokens: rebuild the per-token price from them
         realized, remaining, k = 0.0, 0, 0
@@ -51,8 +62,12 @@ def load(db, from_id, leader="", chain=""):
             if remaining > 0:
                 ev.append((ts, "mark", None, None, (value - realized) / remaining, None))
         ev.sort(key=lambda e: (e[0], e[1] != "fill"))
-        out.append((pid, chain, cost, exitv, status, ev, who))
+        out.append((pid, chain, cost, exitv, status, ev, who, prof))
     return out
+
+
+def closed_pnl(data):
+    return sum(d[3] - d[2] for d in data if d[4] == "closed")
 
 
 def avg(xs):
@@ -78,7 +93,7 @@ def gap_filter(db, data):
         skip = [d for d in data if d not in keep]
         res = [simulate(d[5], "mirror", 0.60) for d in keep]
         sres = [simulate(d[5], "mirror", 0.60) for d in skip]
-        actual = sum(e - c for _, _, c, e, s, _, _ in keep if s == "closed")
+        actual = closed_pnl(keep)
         print(f"{'no filter' if lim is None else f'{lim:.0f}%':<14} {len(keep):>4} {sum(r[0] for r in res):>+12,.0f} "
               f"{sum(r[0] > 0 for r in res):>3}/{len(res):<3} {actual:>+15,.0f} {len(skip):>7} "
               f"{(f'{sum(r[0] for r in sres):+,.0f}' if sres else '-'):>17}")
@@ -88,20 +103,20 @@ def gap_filter(db, data):
 
 
 def by_leader(db, data):
-    print(f"{'leader':<9} {'pos':>4} {'closed':>6} {'actual $':>10} {'mirror-60 $':>12} {'wins':>7} "
+    print(f"{'leader':<9} {'profile':<12} {'pos':>4} {'closed':>6} {'actual $':>10} {'mirror-60 $':>12} {'wins':>7} "
           f"{'entry gap':>9} {'sell gap':>8} {'sell seen':>9} {'sell filled':>11}")
     cols = {r[1] for r in db.execute("PRAGMA table_info(xchain_fills)")}
-    leaders = sorted({d[6] for d in data}, key=lambda l: -sum(1 for d in data if d[6] == l))
-    for who in leaders:
-        rows = [d for d in data if d[6] == who]
+    groups = sorted({(d[6], d[7]) for d in data}, key=lambda g: -sum(1 for d in data if (d[6], d[7]) == g))
+    for who, prof in groups:
+        rows = [d for d in data if (d[6], d[7]) == (who, prof)]
         ids = tuple(d[0] for d in rows)
         seen = "detect_delay_s" if "detect_delay_s" in cols else "NULL"          # older DB: column not there yet
         q = f"SELECT side, gap_pct, {seen}, delay_s FROM xchain_fills WHERE position_id IN ({','.join('?' * len(ids))})"
         fills = db.execute(q, ids).fetchall()
         sells = [f for f in fills if f[0] == "sell"]
         res = [simulate(d[5], "mirror", 0.60) for d in rows]
-        actual = sum(e - c for _, _, c, e, s, _, _ in rows if s == "closed")
-        print(f"{who[:8]:<9} {len(rows):>4} {sum(d[4] == 'closed' for d in rows):>6} {actual:>+10,.0f} "
+        actual = closed_pnl(rows)
+        print(f"{who[:8]:<9} {prof[:12]:<12} {len(rows):>4} {sum(d[4] == 'closed' for d in rows):>6} {actual:>+10,.0f} "
               f"{sum(r[0] for r in res):>+12,.0f} {sum(r[0] > 0 for r in res):>3}/{len(res):<3} "
               f"{fmt(avg([f[1] for f in fills if f[0] == 'buy']), '+.1f', '%'):>9} "
               f"{fmt(avg([f[1] for f in sells]), '+.1f', '%'):>8} {fmt(avg([f[2] for f in sells]), '.0f', 's'):>9} "
@@ -142,14 +157,15 @@ def main():
     ap.add_argument("--from-id", type=int, default=0)
     ap.add_argument("--leader", default="", help="only this leader (wallet prefix)")
     ap.add_argument("--chain", default="", help="only this chain (robinhood / bsc)")
+    ap.add_argument("--profile", default="", help="only positions opened under this profile ('default' = none)")
     ap.add_argument("--list", action="store_true", help="one line per position (mirror, -60%%)")
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{os.path.abspath(os.path.expanduser(args.db))}?mode=ro", uri=True)
-    data = load(db, args.from_id, args.leader, args.chain)
+    data = load(db, args.from_id, args.leader, args.chain, args.profile)
     if not data:
         print("no xchain paper positions with fills yet")
         return
-    actual = sum(e - c for _, _, c, e, s, _, _ in data if s == "closed")
+    actual = closed_pnl(data)
     n_closed = sum(d[4] == "closed" for d in data)
     print(f"{len(data)} xchain paper positions ({n_closed} closed, actual closed PnL ${actual:+,.2f})")
     print("cells: PnL USD  wins/n  c = censored (still holding when the data ended)\n")
@@ -167,9 +183,9 @@ def main():
     by_leader(db, data)
     if args.list:
         print()
-        for pid, chain, cost, exitv, status, ev, who in data:
+        for pid, chain, cost, exitv, status, ev, who, prof in data:
             pnl, c = simulate(ev, "mirror", 0.60)
-            print(f"  #{pid:<5} {who[:8]:<9} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
+            print(f"  #{pid:<5} {who[:8]:<9} {prof[:12]:<12} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
                   f"{'' if exitv is None else f'${exitv - cost:+,.2f}':>10}  sim ${pnl:+,.2f}{' (c)' if c else ''}")
 
 

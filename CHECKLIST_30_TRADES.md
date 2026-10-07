@@ -29,3 +29,16 @@ HYPOTHESIS 3 (Oct 06 10:53) replaces H2: mc 30k-500k, stop -20%, trailing 30% af
   + only_first_leader_buy on in live since Oct 06 11:53.
 - Manual sell: stop bot, then  SOL_PRIVATE_KEY="$(security find-generic-password -a copybot -s SOL_PRIVATE_KEY -w)" python close_all.py  [--id N]
 - Oct 06 23:18: LIVE bot stopped. Dev/paper bot capacity: jupiter_max_rps 9 -> 8 (plan limit 10, live off), poll_interval_s 1.0 (unchanged), paper: true.
+- Oct 07 (PAPER only): leader profile trail_Leader-B for Leader-B (config leader_profiles),
+  active from the first restart with this code (note the restart time here: ________).
+  Solana + xchain: no TP, trailing 35% once 1.5x, stop -60% before that; his sells NOT followed.
+  Size $200 / his median $913 = 0.219x his USD, cap $500 per token incl. his adds (xchain; Solana = 1 position/token),
+  skip < $25. Cap $500, not $1,000: in the backtest (exact_bot.py, merged adds as the bot does) $1,000 added only
+  +$179 base / +$39 stress, did worse without the best 3, and raised peak capital $2.0k -> $2.8k.
+  Backtest caveats: IN-SAMPLE (1.5x/35%/-60% picked on the same data), EXCLUDES ethereum/arc buys (bot can't trade them),
+  28 tokens; $500 cap: base +$1,782 (+20%), stress (exits at candle low) +$795, and without the best 3 tokens
+  only +$506 base / -$54 stress = close to zero. Two Solana runners carry most of the profit. Positions carry timing.profile / size_factor / exits; older positions of his keep the default exits.
+  PRE-REGISTERED TEST: judge only on positions opened under trail_Leader-B after the restart, at ~30 tokens:
+  pass = total PnL > 0 with the best 3 tokens removed. Backtest (Sep 16-Oct 7, 55 buys) is in-sample: don't count it.
+  Check: python whatif_xchain.py --profile trail_Leader-B --list ; python whatif_ticksv2.py --profile trail_Leader-B ;
+         python -m scripts.xchain_report --all

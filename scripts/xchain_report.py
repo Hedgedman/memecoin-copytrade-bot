@@ -9,6 +9,7 @@ His trades (Relay)  every leader's cross-chain buys/sells in the window, all cha
 Our paper           robinhood/bsc paper copies: buys copied / skipped, entry gap (our fill vs his price),
                     sell gap (our mirrored sell vs his), closed positions with mirrored exits (PnL USD),
                     open positions (value = realized + latest Relay quote for the rest, minus cost).
+Rows are split by profile (bot/profiles.py; 'default' = the global xchain paper settings).
 Medians, not means: a few memecoin entries 40-70% above his price would swamp an average.
 Sample sizes are printed on purpose: a row with 1-2 trades says nothing.
 """
@@ -81,11 +82,15 @@ def main():
 
     # ---------- our paper ----------
     ours = defaultdict(lambda: {"copied": 0, "skipped": 0, "entry": [], "sellgap": [], "closed": [], "open": []})
+    profile_of = lambda timing: json.loads(timing or "{}").get("profile") or "default"
+    last_profile = dict(db.execute(                       # a leader's skips count under his latest profile
+        "SELECT leader, timing FROM positions WHERE paper=1 AND chain!='solana' ORDER BY id"))
+    last_profile = {k: profile_of(v) for k, v in last_profile.items()}
     leader_col = "COALESCE(f.leader, p.leader)" if has_col("xchain_fills", "leader") else "p.leader"
-    for leader, chain, side, gap in db.execute(
-            f"SELECT {leader_col}, f.chain, f.side, f.gap_pct FROM xchain_fills f JOIN positions p "
+    for leader, chain, side, gap, timing in db.execute(
+            f"SELECT {leader_col}, f.chain, f.side, f.gap_pct, p.timing FROM xchain_fills f JOIN positions p "
             "ON p.id = f.position_id WHERE f.ts >= ?", (since,)):
-        o = ours[(leader, chain)]
+        o = ours[(leader, chain, profile_of(timing))]
         if side == "buy":
             o["copied"] += 1
             o["entry"].append(gap)
@@ -93,12 +98,14 @@ def main():
             o["sellgap"].append(gap)
     for leader, detail in db.execute("SELECT leader, detail FROM leader_events WHERE kind='xchain_paper_skip' "
                                      "AND ts >= ?", (since,)):
-        ours[(leader or "?", (detail or "?").split(" ")[0])]["skipped"] += 1
+        prof = (detail.split("profile ")[1].split(":")[0] if detail and "profile " in detail
+                else last_profile.get(leader, "default"))
+        ours[(leader or "?", (detail or "?").split(" ")[0], prof)]["skipped"] += 1
     open_rows = []
     for pid, leader, chain, cost, exitv, status, closed_at, opened, timing in db.execute(
             "SELECT id, leader, chain, cost, exit_value, status, closed_at, opened_at, timing FROM positions "
             "WHERE paper=1 AND chain!='solana' AND (status!='closed' OR closed_at >= ?)", (since,)):
-        o = ours[(leader, chain)]
+        o = ours[(leader, chain, profile_of(timing))]
         if status == "closed":
             o["closed"].append(exitv - cost)
         else:
@@ -107,19 +114,19 @@ def main():
             o["open"].append(pnl)
             open_rows.append((pid, leader, chain, json.loads(timing or "{}"), cost, pnl, opened))
     print("OUR PAPER (robinhood/bsc)        gaps: + = we paid more (buy) / got more (sell) than him")
-    print(f"{'leader':<9} {'chain':<11} {'copied':>6} {'skipped':>7} {'entry gap':>9} {'sell gap':>8} "
+    print(f"{'leader':<9} {'chain':<11} {'profile':<12} {'copied':>6} {'skipped':>7} {'entry gap':>9} {'sell gap':>8} "
           f"{'closed':>6} {'won':>4} {'closed PnL $':>12} {'open':>4} {'open PnL $':>10}")
     tot = defaultdict(float)
-    for (leader, chain), o in sorted(ours.items(), key=lambda kv: (-kv[1]["copied"] - len(kv[1]["open"]), kv[0])):
+    for (leader, chain, prof), o in sorted(ours.items(), key=lambda kv: (-kv[1]["copied"] - len(kv[1]["open"]), kv[0])):
         cl, op = o["closed"], [x for x in o["open"] if x is not None]
-        print(f"{leader[:8]:<9} {chain:<11} {o['copied']:>6} {o['skipped']:>7} {f(med(o['entry']), '+.1f', '%'):>9} "
+        print(f"{leader[:8]:<9} {chain:<11} {prof[:12]:<12} {o['copied']:>6} {o['skipped']:>7} {f(med(o['entry']), '+.1f', '%'):>9} "
               f"{f(med(o['sellgap']), '+.1f', '%'):>8} {len(cl):>6} {sum(x > 0 for x in cl):>4} "
               f"{(f'{sum(cl):+,.0f}' if cl else '-'):>12} {len(o['open']):>4} {(f'{sum(op):+,.0f}' if op else '-'):>10}")
         tot["copied"] += o["copied"]; tot["skipped"] += o["skipped"]; tot["closed"] += len(cl)
         tot["pnl"] += sum(cl); tot["open"] += len(o["open"]); tot["open_pnl"] += sum(op)
     if not ours:
         print("  no paper activity in this window")
-    print(f"{'total':<21} {tot['copied']:>6.0f} {tot['skipped']:>7.0f} {'':>9} {'':>8} {tot['closed']:>6.0f} {'':>4} "
+    print(f"{'total':<34} {tot['copied']:>6.0f} {tot['skipped']:>7.0f} {'':>9} {'':>8} {tot['closed']:>6.0f} {'':>4} "
           f"{tot['pnl']:>+12,.0f} {tot['open']:>4.0f} {tot['open_pnl']:>+10,.0f}")
     if tot["closed"] < 20:
         print(f"  note: {tot['closed']:.0f} closed positions - far too few to judge a result (aim for 30+ per leader)")
@@ -128,7 +135,8 @@ def main():
         print("\nOPEN POSITIONS")
         for pid, leader, chain, t, cost, pnl, opened in sorted(open_rows):
             age = (time.time() - opened) / 3600
-            print(f"  #{pid:<5} {leader[:8]:<9} {chain:<10} {t.get('symbol', '')[:12]:<12} cost ${cost:>8,.2f}  "
+            print(f"  #{pid:<5} {leader[:8]:<9} {chain:<10} {t.get('profile', 'default')[:12]:<12} "
+                  f"{t.get('symbol', '')[:12]:<12} cost ${cost:>8,.2f}  "
                   f"now {f(pnl, '+,.2f', ' $'):>12} ({f(100 * pnl / cost if pnl is not None else None, '+.0f', '%')})"
                   f"  held {age:.1f} h")
 

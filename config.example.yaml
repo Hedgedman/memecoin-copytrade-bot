@@ -138,3 +138,17 @@ xchain:
     log_head_lag: 3                   # query logs up to head - 3 blocks (load-balanced RPC nodes lag)
     log_fail_warn: 8                  # failed rounds in a row before warning (range is re-queried, nothing lost)
     dex_confirm_s: 15                 # then check Relay: no request for that tx = DEX sell
+
+# --- per-leader profiles (PAPER only; ignored with an error when paper: false). See bot/profiles.py.
+leader_profiles: {}
+#  <solana wallet>:
+#    name: trail_Leader-B
+#    mode: trail                      # no take-profit; trailing stop + stop-loss; his sells are NOT followed
+#    trailing_activate: 0.5           # trail starts at 1.5x
+#    trailing_pct: 0.35
+#    stop_loss: 0.60
+#    target_usd: 200                  # our USD = target_usd / his_median_usd x his USD
+#    his_median_usd: 913
+#    max_usd_per_token: 500           # incl. his add-ons (xchain)
+#    min_usd: 25
+#    mark_interval_s: 30              # xchain trail checks

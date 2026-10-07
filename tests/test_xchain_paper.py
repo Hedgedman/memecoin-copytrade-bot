@@ -51,10 +51,11 @@ class FakeRelay:
 
 
 class FakeRpc:
-    def __init__(self):
+    def __init__(self, evms=(EVM,)):
         self.balance = {}                      # token -> his balance (raw)
         self.logs = []
         self.block = 1000
+        self.evms = {pad_addr(e) for e in evms}    # EVM addresses of the positions under test
 
     async def __call__(self, url, method, params):
         if method == "eth_call":
@@ -63,7 +64,8 @@ class FakeRpc:
             return hex(self.block)
         if method == "eth_getLogs":
             f = params[0]
-            assert f["topics"] == [TRANSFER, [pad_addr(EVM)]] and f["address"], f
+            assert f["topics"][0] == TRANSFER and set(f["topics"][1]) <= self.evms and f["address"], f
+            assert 0 <= int(f["fromBlock"], 16) <= int(f["toBlock"], 16), f
             return [lg for lg in self.logs if lg["address"] in f["address"]
                     and int(f["fromBlock"], 16) <= int(lg["blockNumber"], 16) <= int(f["toBlock"], 16)]
         if method == "eth_getBlockByNumber":

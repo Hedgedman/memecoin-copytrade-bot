@@ -103,12 +103,18 @@ def leader_exit_ts(db, token, leader, opened):
     return r[0] if r else None
 
 
-def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False):
+def profile_of(timing) -> str:
+    """Leader profile a position was opened under (bot/profiles.py), 'default' if none."""
+    return json.loads(timing or "{}").get("profile") or "default"
+
+
+def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile=""):
     # read-only, so it is safe to point --db at the live bot's database while it runs
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
-    rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader FROM positions WHERE paper=? AND chain='solana' AND "
-                      "status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
+    rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader, timing FROM positions WHERE paper=? "
+                      "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
+    rows = [r[:6] for r in rows if not profile or profile_of(r[6]) == profile]
     out, skipped, mc_out = [], 0, 0
     for pid, token, amount, cost, opened, leader in rows:
         if min_mc is not None or max_mc is not None:
@@ -272,7 +278,8 @@ def venue_class(timing: dict, pos: "Pos | None") -> str:
     return "jupiter" if venue in ("jupiter", "live", "") else "vault"
 
 
-def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard):
+def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard,
+                profile=""):
     """Report-only: actual results and the what-if per pricing class (pool / vault / Jupiter)."""
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
@@ -281,6 +288,8 @@ def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee
     for pid, token, leader, cost, exitv, opened, reason, timing in db.execute(
             "SELECT id, token, leader, cost, exit_value, opened_at, exit_reason, timing FROM positions WHERE paper=? "
             "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)):
+        if profile and profile_of(timing) != profile:
+            continue
         if min_mc is not None or max_mc is not None:
             mc = entry_mc(db, token, leader, opened)
             if mc is None or (min_mc is not None and mc < min_mc) or (max_mc is not None and mc >= max_mc):
@@ -355,6 +364,7 @@ def main():
     ap.add_argument("--hard", type=float, default=0.25, help="hard stop from the reference that never waits")
     ap.add_argument("--min-mc", type=float, default=None, help="only positions entered at >= this market cap (USD)")
     ap.add_argument("--max-mc", type=float, default=None, help="only positions entered below this market cap (USD)")
+    ap.add_argument("--profile", default="", help="only positions opened under this leader profile ('default' = none)")
     ap.add_argument("--leader-sl", type=float, default=None,
                     help="extra safety-stop row for the leader-exit style, e.g. 0.4 (rows always include off/20/30/40/60%%)")
     args = ap.parse_args()
@@ -376,7 +386,9 @@ def main():
     basis = ex.get("stop_basis", "cost")
 
     data, skipped, mc_out = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
-                                 args.max_after, args.min_mc, args.max_mc, args.live)
+                                 args.max_after, args.min_mc, args.max_mc, args.live, args.profile)
+    if args.profile:
+        print(f"profile filter: {args.profile}")
     if args.live:
         print("LIVE positions (real fills; pool prices scaled with each position's first real mark)")
     n = len(data)
@@ -472,7 +484,7 @@ def main():
     venue_split(args.db, args.from_id, args.live, data, args.min_mc, args.max_mc,
                 [("config exits", cur), ("fixed TP +30% / SL -20%", ("fixed", 0.30, 0, 0.20)),
                  ("trail 30%/+50% SL -20%", ("trailing", 0.50, 0.30, 0.20))],
-                delay, fee, basis, args.part, args.confirm, args.hard)
+                delay, fee, basis, args.part, args.confirm, args.hard, args.profile)
 
     print(f"\n{len(allres)} settings tested on {n} trades: the best one is partly luck (overfitting).")
     print("Before changing the bot: check the same setting is also good on LATER trades (--from-id).")

@@ -301,7 +301,7 @@ async def report_tests():
     assert rep.returncode == 0, rep.stderr
     ours = rep.stdout.split("OUR PAPER")[1]
     rows = {l.split()[0]: l.split() for l in ours.splitlines() if l[:8] in (W[:8], L2[:8])}
-    assert rows[W[:8]][1:4] == ["robinhood", "1", "0"] and rows[L2[:8]][4] == "+50.0%", rows
+    assert rows[W[:8]][1:5] == ["robinhood", "default", "1", "0"] and rows[L2[:8]][5] == "+50.0%", rows
     assert "OPEN POSITIONS" in rep.stdout and "far too few" in rep.stdout
     why = subprocess.run([sys.executable, "-c", f"import sys; sys.argv=['why.py', '{EVM2.upper().replace('0X', '0x')}']; "
                           f"import sqlite3; c=sqlite3.connect; sqlite3.connect=lambda p: c('{db_path}'); "

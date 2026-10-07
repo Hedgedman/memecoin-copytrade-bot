@@ -868,6 +868,10 @@ class SolanaAdapter(ChainAdapter):
             self._sol_usd_val, self._sol_usd_ts = int(q["outAmount"]) / 1e6, time.time()
         return self._sol_usd_val
 
+    async def sol_usd(self) -> float:
+        """SOL price in USD (cached, see _sol_usd): used to size leader-profile buys in USD."""
+        return await self._sol_usd()
+
     # ---------- ChainAdapter API ----------
     async def pre_trade_check(self, token: str, amount_native: float) -> tuple[bool, str]:
         try:

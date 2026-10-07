@@ -41,6 +41,15 @@ class PositionManager:
     def open(self) -> list[Position]:
         return [p for p in self.positions if p.status != "closed"]
 
+    def _exits(self, p: Position) -> tuple[float, float, float, float, float, bool]:
+        """(take_profit, trailing_activate, trailing_pct, stop_loss, max_hold_s, follow_leader_exit):
+        a leader profile's exits stored in the position (bot/profiles.py), else the global ones."""
+        e = p.timing.get("exits")
+        if not e:
+            return self.tp, self.trail_act, self.trail_pct, self.sl, self.max_hold, self.follow_exit
+        return (float(e.get("take_profit", 0)), float(e.get("trailing_activate", 0)), float(e.get("trailing_pct", 0)),
+                float(e.get("stop_loss", self.sl)), float(e.get("max_hold_s", 0)), bool(e.get("follow_leader_exit")))
+
     def add(self, p: Position):
         self.positions.append(p)
         a = self.adapters.get(p.chain)
@@ -54,10 +63,9 @@ class PositionManager:
                 asyncio.ensure_future(self._check(p))
 
     async def on_leader_sell(self, chain: str, leader: str, token: str):
-        if not self.follow_exit:
-            return
         for p in self.open():
-            if p.chain == chain and p.token == token and p.leader == leader and p.status == "open":
+            if p.chain == chain and p.token == token and p.leader == leader and p.status == "open" \
+                    and self._exits(p)[5]:
                 await self.close(p, "leader_sold")
 
     async def close(self, p: Position, reason: str, trigger_value: float | None = None):
@@ -106,13 +114,14 @@ class PositionManager:
         if p.status != "open":
             return
         age = time.time() - p.opened_at
+        tp, trail_act, trail_pct, sl, max_hold, _ = self._exits(p)
         if value is None:
             p.quote_failures += 1
             if p.quote_failures == self.max_quote_failures or (
                     p.quote_failures > self.max_quote_failures and p.quote_failures % 60 == 0):
                 log.error("no exit route for %s after %d tries - likely rugged/illiquid, needs manual check",
                           p.token, p.quote_failures)
-            if self.max_hold > 0 and age > self.max_hold:
+            if max_hold > 0 and age > max_hold:
                 await self.close(p, "max_hold_no_quote")
             return
         p.quote_failures = 0
@@ -126,14 +135,14 @@ class PositionManager:
         p.peak_value = value if p.peak_value is None else max(p.peak_value, value)
         ret = value / p.cost - 1
         stop_ret = value / p.ref_value - 1 if self.stop_basis == "entry_price" else ret
-        trailing_on = self.trail_pct > 0 and p.peak_value / p.cost - 1 >= self.trail_act
-        if self.tp > 0 and ret >= self.tp:
+        trailing_on = trail_pct > 0 and p.peak_value / p.cost - 1 >= trail_act
+        if tp > 0 and ret >= tp:
             await self.close(p, "take_profit", value)
-        elif trailing_on and value <= p.peak_value * (1 - self.trail_pct):
+        elif trailing_on and value <= p.peak_value * (1 - trail_pct):
             await self.close(p, "trailing_stop", value)
-        elif not trailing_on and stop_ret <= -self.sl:
+        elif not trailing_on and stop_ret <= -sl:
             await self.close(p, "stop_loss", value)
-        elif self.max_hold > 0 and age > self.max_hold:
+        elif max_hold > 0 and age > max_hold:
             await self.close(p, "max_hold", value)
 
     async def run(self):
