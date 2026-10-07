@@ -58,6 +58,8 @@ class XchainPaperTrader:
         self.logs_s = float(cfg.get("logs_poll_s", 15))
         self.dex_confirm_s = float(cfg.get("dex_confirm_s", 15))
         self.max_span = int(cfg.get("max_log_span", 5000))
+        self.head_lag = int(cfg.get("log_head_lag", 3))          # stay behind the head: load-balanced RPCs lag
+        self.fail_warn = int(cfg.get("log_fail_warn", 8))         # warn after this many failed rounds in a row
         self.sell_retries = int(cfg.get("sell_retries", 3))
         self.kill = kill_switch_file
         self.positions: dict[tuple[str, str, str], Position] = {          # (chain, token, leader)
@@ -72,6 +74,7 @@ class XchainPaperTrader:
         self._last_block: dict[str, int] = {}
         self._seen_logs: OrderedDict[str, None] = OrderedDict()
         self._logs_warned: set[str] = set()
+        self._logs_failing: dict[str, int] = {}                   # chain -> failed rounds in a row
 
     # ---------- inputs ----------
     def on_his_trade(self, t: XTrade, leader: str, evm: str, detected_at: float):
@@ -276,21 +279,31 @@ class XchainPaperTrader:
             if not (self.rpc.get(chain) or self.rpc_fallback.get(chain)):
                 self._warn_logs(chain, "no RPC configured")
                 continue
-            latest = await self._rpc(chain, "eth_blockNumber", [])
-            if not isinstance(latest, str):
-                continue
-            latest = int(latest, 16)
-            frm = max(self._last_block.get(chain, latest - self.max_span) + 1, latest - self.max_span)
-            if frm > latest:
-                continue
             evms = sorted({p.timing["evm"] for p in self.positions.values() if p.chain == chain})
-            logs = await self._rpc(chain, "eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(latest),
-                                                         "address": sorted(held),
-                                                         "topics": [TRANSFER, [pad_addr(e) for e in evms]]}])
+            latest, logs = None, None
+            for attempt in range(2):                             # one quick retry (e.g. a node behind the head)
+                if attempt:
+                    await asyncio.sleep(1.0)
+                head = await self._rpc(chain, "eth_blockNumber", [])
+                if not isinstance(head, str):
+                    logs = head
+                    continue
+                latest = int(head, 16) - self.head_lag
+                frm = max(self._last_block.get(chain, latest - self.max_span) + 1, latest - self.max_span)
+                if frm > latest:
+                    logs = []
+                    break
+                logs = await self._rpc(chain, "eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(latest),
+                                                             "address": sorted(held),
+                                                             "topics": [TRANSFER, [pad_addr(e) for e in evms]]}])
+                if isinstance(logs, list):
+                    break
             if not isinstance(logs, list):
-                self._warn_logs(chain, f"eth_getLogs failed: {str(logs)[:150]}")
+                # the block cursor stays put: the next round asks for the same range again, nothing is lost
+                self._logs_failed(chain, str(logs)[:150])
                 continue
-            self._last_block[chain] = latest
+            self._logs_ok(chain)
+            self._last_block[chain] = max(self._last_block.get(chain, 0), latest)
             for lg in logs:
                 k = f"{lg['transactionHash']}:{lg.get('logIndex')}"
                 if k in self._seen_logs:
@@ -299,6 +312,21 @@ class XchainPaperTrader:
                 if len(self._seen_logs) > 5000:
                     self._seen_logs.popitem(last=False)
                 self._spawn(self._dex_check(chain, lg, time.time()))
+
+    def _logs_failed(self, chain: str, why: str):
+        n = self._logs_failing.get(chain, 0) + 1
+        self._logs_failing[chain] = n
+        if n == self.fail_warn:
+            log.warning("xchain: DEX-sell logs on %s failing for %d rounds in a row (%s) - DEX sells are delayed, "
+                        "retrying every round", chain, n, why)
+            self.store.record_event(time.time(), "", "", "xchain_logs_failing", "", None, f"{chain}: {n} rounds: {why}")
+        else:
+            log.debug("xchain: eth_getLogs on %s failed (%d in a row, will retry): %s", chain, n, why)
+
+    def _logs_ok(self, chain: str):
+        n = self._logs_failing.pop(chain, 0)
+        if n >= self.fail_warn:
+            log.info("xchain: DEX-sell logs on %s working again after %d failed rounds (range re-queried)", chain, n)
 
     def _warn_logs(self, chain: str, why: str):
         if chain not in self._logs_warned:

@@ -25,7 +25,7 @@ RELAY_SOLVER = "F7p3dFrjRTbtRp8FRF6qHLomXbKRBzpvBLjtQcfcgmNe"
 SOLANA_CHAIN_ID = 792703809                      # Relay's id for Solana
 USDC_SOL = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 CHAIN_NAMES = {SOLANA_CHAIN_ID: "solana", 4663: "robinhood", 56: "bsc", 1: "ethereum", 8453: "base",
-               143: "monad", 999: "hyperevm", 5042: "arc"}     # names as in Relay GET /chains
+               143: "monad", 999: "hyperevm", 5042: "arc", 1337: "hyperliquid"}   # names as in Relay GET /chains
 FINAL = ("success", "refund", "failure")
 # Moving these between chains is cash management, not a token trade (live v3: after selling a token
 # on an EVM DEX he bridges the WETH/WBNB/USDC back to Solana) -> side "bridge".

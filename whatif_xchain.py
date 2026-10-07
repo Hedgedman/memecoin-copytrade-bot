@@ -2,6 +2,8 @@
 
     python whatif_xchain.py [--db copybot.db] [--from-id N] [--leader PREFIX] [--chain bsc] [--list]
 
+Entry-gap filter (report only): what if we had skipped a copy when our entry price was already more than
+X% above his (X = 10/20/40%)? Decided on the opening fill; add-ons of kept positions stay as they were.
 Per leader (always shown): positions, actual PnL, mirror/-60% replay, entry gap (our fill vs his price),
 and how late we saw (seen) and mirrored (filled) his sells, from xchain_fills.
 
@@ -60,6 +62,29 @@ def avg(xs):
 
 def fmt(x, spec, unit=""):
     return "-" if x is None else f"{x:{spec}}{unit}"
+
+
+GAP_LIMITS = (None, 10.0, 20.0, 40.0)
+
+
+def gap_filter(db, data):
+    gaps = {pid: g for pid, g in db.execute("SELECT position_id, gap_pct FROM xchain_fills WHERE side='buy' "
+                                             "AND reason='open'")}
+    print("ENTRY-GAP FILTER (report only): skip the copy if our opening fill was > X% above his price")
+    print(f"{'skip if gap >':<14} {'kept':>4} {'mirror-60 $':>12} {'wins':>7} {'actual closed $':>15} "
+          f"{'skipped':>7} {'their mirror-60 $':>17}")
+    for lim in GAP_LIMITS:
+        keep = [d for d in data if lim is None or gaps.get(d[0]) is None or gaps[d[0]] <= lim]
+        skip = [d for d in data if d not in keep]
+        res = [simulate(d[5], "mirror", 0.60) for d in keep]
+        sres = [simulate(d[5], "mirror", 0.60) for d in skip]
+        actual = sum(e - c for _, _, c, e, s, _, _ in keep if s == "closed")
+        print(f"{'no filter' if lim is None else f'{lim:.0f}%':<14} {len(keep):>4} {sum(r[0] for r in res):>+12,.0f} "
+              f"{sum(r[0] > 0 for r in res):>3}/{len(res):<3} {actual:>+15,.0f} {len(skip):>7} "
+              f"{(f'{sum(r[0] for r in sres):+,.0f}' if sres else '-'):>17}")
+    unknown = sum(gaps.get(d[0]) is None for d in data)
+    if unknown:
+        print(f"  {unknown} position(s) without his price (gap unknown) are always kept")
 
 
 def by_leader(db, data):
@@ -136,6 +161,8 @@ def main():
             pnl, wins, cens = sum(r[0] for r in res), sum(r[0] > 0 for r in res), sum(r[1] for r in res)
             cells.append(f"{pnl:+10,.0f} {wins:>3}/{len(res):<3} c{cens:<3}")
         print(f"{style:<11}" + "".join(f"{c:>24}" for c in cells))
+    print()
+    gap_filter(db, data)
     print()
     by_leader(db, data)
     if args.list:

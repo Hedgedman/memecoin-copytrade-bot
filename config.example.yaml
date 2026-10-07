@@ -135,4 +135,6 @@ xchain:
     safety_stop: 0.60                 # sell everything at -60% vs the cost of what we still hold
     mark_interval_s: 120              # Relay quote per open position (mark + stop check)
     logs_poll_s: 15                   # eth_getLogs for Transfers out of his EVM address (DEX sells), held tokens only
+    log_head_lag: 3                   # query logs up to head - 3 blocks (load-balanced RPC nodes lag)
+    log_fail_warn: 8                  # failed rounds in a row before warning (range is re-queried, nothing lost)
     dex_confirm_s: 15                 # then check Relay: no request for that tx = DEX sell

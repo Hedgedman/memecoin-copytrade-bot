@@ -29,6 +29,7 @@ How it works
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import sqlite3
@@ -256,6 +257,57 @@ def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee:
     return cash + lam / L * f - tx_fee, True
 
 
+VENUE_CLASSES = (("pool", "pump.fun curve / PumpSwap: exact pool math, streamed"),
+                 ("vault", "Meteora DAMM v2: vault balances x Jupiter factor, streamed"),
+                 ("jupiter", "other venues: Jupiter quotes, polled - replayable only if a pool was recorded later"))
+
+
+def venue_class(timing: dict, pos: "Pos | None") -> str:
+    """How the bot priced this position: from the fill model it logged ('jupiter+0.8s', 'pumpswap_amm+0.8s'...),
+    else from the replayed ticks, else 'jupiter' (no ticks = not pool-priced)."""
+    model = (timing.get("fill_model") or "").split("+")[0]
+    venue = model or (pos.series[0][1].venue if pos else "jupiter")
+    if venue in ("pumpfun_curve", "pumpswap_amm"):
+        return "pool"
+    return "jupiter" if venue in ("jupiter", "live", "") else "vault"
+
+
+def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard):
+    """Report-only: actual results and the what-if per pricing class (pool / vault / Jupiter)."""
+    db = sqlite3.connect(db_path if db_path.startswith("file:") else
+                         f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
+    by_id = {p.pid: p for p in data}
+    groups = {c: [] for c, _ in VENUE_CLASSES}
+    for pid, token, leader, cost, exitv, opened, reason, timing in db.execute(
+            "SELECT id, token, leader, cost, exit_value, opened_at, exit_reason, timing FROM positions WHERE paper=? "
+            "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)):
+        if min_mc is not None or max_mc is not None:
+            mc = entry_mc(db, token, leader, opened)
+            if mc is None or (min_mc is not None and mc < min_mc) or (max_mc is not None and mc >= max_mc):
+                continue
+        t = json.loads(timing or "{}")
+        groups[venue_class(t, by_id.get(pid))].append((pid, cost, exitv, reason))
+    print("\nVENUE SPLIT (report only): ACTUAL closed results per pricing class, and the what-if where replayable")
+    hdr = f"  {'class':<8} {'n':>3} {'wins':>5} {'PnL SOL':>8} {'avg %':>6} {'median %':>8} {'stop fill med':>13}"
+    print(hdr + "".join(f"{lbl[:22]:>24}" for lbl, _ in styles))
+    for cls, desc in VENUE_CLASSES:
+        g = groups[cls]
+        if not g:
+            print(f"  {cls:<8} {0:>3}   ({desc})")
+            continue
+        r = sorted((e - c) / c for _, c, e, _ in g)
+        stops = sorted((e - c) / c for _, c, e, why in g if why == "stop_loss")
+        row = (f"  {cls:<8} {len(g):>3} {sum(x > 0 for x in r):>5} {sum(e - c for _, c, e, _ in g):>+8.2f} "
+               f"{100 * sum(r) / len(r):>+6.1f} {100 * r[len(r) // 2]:>+8.1f} "
+               f"{(f'{100 * stops[len(stops) // 2]:+.1f}% (n={len(stops)})') if stops else '-':>13}")
+        sub = [by_id[pid] for pid, *_ in g if pid in by_id]
+        for _, (style, a, b, s_) in styles:
+            row += f"{(cell(score(sub, style, a, b, s_, delay, fee, basis, part, confirm, hard), len(sub)) if sub else 'no ticks'):>24}"
+        print(row + f"   ({desc})")
+    print("  what-if cells: model PnL on the replayable positions of that class (pool model is a bit optimistic "
+          "vs actual fills)")
+
+
 def score(data, style, a, b, sl, delay, fee, basis, part, confirm=0.0, hard=0.0):
     pnl = wins = cens = 0
     for p in data:
@@ -414,6 +466,13 @@ def main():
         for c in confirms:
             row += f"{cell(score(data, style, a, b, s_, delay, fee, basis, args.part, c, args.hard), n):>17}"
         print(row)
+
+    cur = (("fixed", float(ex.get("take_profit")), 0, float(ex.get("stop_loss", 0.1)))
+           if float(ex.get("take_profit") or 0) > 0 else ("trailing", t_act, t_pct, sl))
+    venue_split(args.db, args.from_id, args.live, data, args.min_mc, args.max_mc,
+                [("config exits", cur), ("fixed TP +30% / SL -20%", ("fixed", 0.30, 0, 0.20)),
+                 ("trail 30%/+50% SL -20%", ("trailing", 0.50, 0.30, 0.20))],
+                delay, fee, basis, args.part, args.confirm, args.hard)
 
     print(f"\n{len(allres)} settings tested on {n} trades: the best one is partly luck (overfitting).")
     print("Before changing the bot: check the same setting is also good on LATER trades (--from-id).")

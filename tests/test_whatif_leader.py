@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 
 from bot.pricing.pools import PoolState
-from whatif_ticksv2 import L, Pos, leader_exit_ts, run
+from whatif_ticksv2 import L, Pos, leader_exit_ts, run, venue_class, venue_split
 
 base = PoolState("pumpswap_amm", 10**12, 100 * L)
 K = base.sol_res * base.tok_res
@@ -58,6 +58,37 @@ def main():
     print("leader_exit_ts: first sell by the same leader after entry")
 
 
+def venue_tests():
+    import contextlib, io, json
+    assert venue_class({"fill_model": "pumpswap_amm+0.8s"}, None) == "pool"
+    assert venue_class({"fill_model": "pumpfun_curve+0.8s"}, None) == "pool"
+    assert venue_class({"fill_model": "meteora_damm_v2+0.8s"}, None) == "vault"
+    assert venue_class({"fill_model": "jupiter+0.8s"}, None) == "jupiter"
+    assert venue_class({}, None) == "jupiter"                                  # no model, no ticks
+    assert venue_class({}, pos([(0, 1.0)], None)) == "pool"                    # old position: from its ticks
+    path = tempfile.mktemp()
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE positions (id, chain, token, leader, cost, exit_value, opened_at, exit_reason, timing, "
+               "paper, status)")
+    rows = [(1, 1.0, 1.3, "take_profit", "pumpswap_amm+0.8s"), (2, 1.0, 0.88, "stop_loss", "pumpswap_amm+0.8s"),
+            (3, 1.0, 0.75, "stop_loss", "jupiter+0.8s")]
+    db.executemany("INSERT INTO positions VALUES (?, 'solana', 'T', 'L', ?, ?, 0, ?, ?, 1, 'closed')",
+                   [(i, c, e, r, json.dumps({"fill_model": m})) for i, c, e, r, m in rows])
+    db.commit(); db.close()
+    out = io.StringIO()
+    p1 = pos([(0, 1.0), (10, 1.5)], None); p1.pid = 1
+    with contextlib.redirect_stdout(out):
+        venue_split(path, 0, False, [p1], None, None, [("fixed", ("fixed", 0.3, 0, 0.2))], 0.0, 0.0,
+                    "entry_price", 0.5, 0.0, 0.25)
+    lines = {l.split()[0]: l for l in out.getvalue().splitlines() if l.strip().split(" ")[0] in ("pool", "jupiter")}
+    assert lines["pool"].split()[1:4] == ["2", "1", "+0.18"], lines["pool"]
+    assert lines["jupiter"].split()[1:4] == ["1", "0", "-0.25"] and "no ticks" in lines["jupiter"], lines["jupiter"]
+    assert "1/1" in lines["pool"]                                               # what-if on the replayable one
+    os.remove(path)
+    print("venue split: pool / vault / jupiter from the fill model; actual results + what-if per class")
+
+
 if __name__ == "__main__":
     main()
+    venue_tests()
     print("ALL PASSED")

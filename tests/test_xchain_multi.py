@@ -25,7 +25,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def chain_tests():
-    assert (CHAIN_NAMES[143], CHAIN_NAMES[999], CHAIN_NAMES[5042]) == ("monad", "hyperevm", "arc")
+    assert (CHAIN_NAMES[143], CHAIN_NAMES[999], CHAIN_NAMES[5042], CHAIN_NAMES[1337]) == ("monad", "hyperevm", "arc", "hyperliquid")
     print("chain ids 143/999/5042 -> monad/hyperevm/arc")
 
 
@@ -188,7 +188,7 @@ async def paper_multi_tests():
     await t.logs_once()
     rpc.logs = [{"address": TOK, "transactionHash": "0xd", "logIndex": "0x0", "blockNumber": hex(1001),
                  "topics": [TRANSFER, pad_addr(EVM), pad_addr("0x" + "99" * 20)], "data": hex(1_000_000 * E)}]
-    rpc.block = 1002
+    rpc.block = 1005                                               # log at 1001 < head - lag (3)
     await t.logs_once(); await settle(t)
     assert not t.positions
     assert store.db.execute("SELECT leader FROM xchain_fills WHERE reason LIKE '%dex%'").fetchall() == [(W,)]
@@ -210,6 +210,47 @@ async def paper_multi_tests():
     assert sum("per leader (5)" in d for d in why) == 1 and sum("max open xchain positions (7)" in d for d in why) == 1, why
     print("paper: one position per leader, token cap over all leaders, his sells only close his position, "
           "5/leader + total cap, fills carry leader + detection delay")
+
+
+async def lagging_node_tests():
+    """BSC public RPC: eth_getLogs on a node behind the head -> retried, no warning, nothing lost."""
+    t, store, relay, rpc = make_multi(log_fail_warn=8)
+    t.rpc = {"bsc": "rpc://public"}
+    relay.price_usd[TOK] = 0.001
+    t.on_his_trade(trade("buy", 1000, 1_000_000, chain="bsc"), W, EVM, time.time())
+    await settle(t)
+    await t.logs_once()                                           # cursor at head - 3
+    start = t._last_block["bsc"]
+    fails = {"n": 0}
+    inner = rpc.__call__
+
+    async def flaky(url, method, params):
+        if method == "eth_getLogs" and fails["n"] < 2 * 9:        # 9 rounds x (try + retry)
+            fails["n"] += 1
+            return {"code": -32602, "message": "block range extends beyond current head block"}
+        return await inner(url, method, params)
+    t._eth = flaky
+    sleeps = []
+    real_sleep = asyncio.sleep
+    asyncio.sleep = lambda s, *a: sleeps.append(s) or real_sleep(0)   # skip the 1 s retry pause
+    try:
+        rpc.logs = [{"address": TOK, "transactionHash": "0xlag", "logIndex": "0x0", "blockNumber": hex(start + 1),
+                     "topics": [TRANSFER, pad_addr(EVM), pad_addr("0x" + "99" * 20)], "data": hex(1_000_000 * E)}]
+        rpc.balance[TOK] = 0
+        rpc.block += 5
+        ev = lambda: [r[0] for r in store.db.execute("SELECT kind FROM leader_events WHERE kind LIKE 'xchain_logs%'")]
+        for i in range(7):
+            await t.logs_once()
+        assert ev() == [] and t._last_block["bsc"] == start and 1.0 in sleeps   # quiet, cursor kept, retried
+        await t.logs_once()                                       # 8th failed round: one warning
+        assert ev() == ["xchain_logs_failing"]
+        await t.logs_once()                                       # 9th: no second warning
+        await t.logs_once(); await settle(t)                      # node caught up: the same range is re-read
+    finally:
+        asyncio.sleep = real_sleep
+    assert ev() == ["xchain_logs_failing"] and not t.positions, ev()
+    assert store.db.execute("SELECT his_ref FROM xchain_fills WHERE side='sell'").fetchone() == ("0xlag",)
+    print("EVM logs: lagging RPC node -> retry, cursor kept, warning only after 8 failed rounds, sell still found")
 
 
 async def rpc_fallback_tests():
@@ -242,7 +283,7 @@ async def wiring_tests():
 async def report_tests():
     t, store, relay, _ = make_multi()
     db_path = store.db.execute("PRAGMA database_list").fetchone()[2]
-    relay.price_usd[TOK] = relay.price_usd[TOK2] = 0.001
+    relay.price_usd[TOK], relay.price_usd[TOK2] = 0.001, 0.0015       # L2's copy fills 50% above his price
     t.on_his_trade(trade("buy", 1000, 1_000_000), W, EVM, time.time())
     t.on_his_trade(trade("buy", 1000, 1_000_000, token=TOK2), L2, EVM2, time.time())
     await settle(t)
@@ -252,12 +293,23 @@ async def report_tests():
     out = subprocess.run([sys.executable, "whatif_xchain.py", "--db", db_path, "--leader", L2[:8]],
                          capture_output=True, text=True, cwd=ROOT)
     assert "1 xchain paper positions" in out.stdout and W[:8] not in out.stdout, out.stdout
+    out = subprocess.run([sys.executable, "whatif_xchain.py", "--db", db_path], capture_output=True, text=True, cwd=ROOT)
+    gap = {l.split()[0]: l.split() for l in out.stdout.splitlines() if l.split() and l.split()[0] in ("10%", "40%", "no")}
+    assert gap["no"][2] == "2" and gap["10%"][1] == "1" and gap["40%"][1] == "1" and gap["40%"][5] == "1", gap
+    rep = subprocess.run([sys.executable, "-m", "scripts.xchain_report", "--db", db_path], capture_output=True,
+                         text=True, cwd=ROOT)
+    assert rep.returncode == 0, rep.stderr
+    ours = rep.stdout.split("OUR PAPER")[1]
+    rows = {l.split()[0]: l.split() for l in ours.splitlines() if l[:8] in (W[:8], L2[:8])}
+    assert rows[W[:8]][1:4] == ["robinhood", "1", "0"] and rows[L2[:8]][4] == "+50.0%", rows
+    assert "OPEN POSITIONS" in rep.stdout and "far too few" in rep.stdout
     why = subprocess.run([sys.executable, "-c", f"import sys; sys.argv=['why.py', '{EVM2.upper().replace('0X', '0x')}']; "
                           f"import sqlite3; c=sqlite3.connect; sqlite3.connect=lambda p: c('{db_path}'); "
                           f"exec(open('why.py').read())"], capture_output=True, text=True, cwd=ROOT)
     assert why.returncode == 0 and f"belongs to leader {L2}" in why.stdout and "xFILL" in why.stdout \
         and "xchain paper position" in why.stdout, why.stdout + why.stderr
-    print("whatif_xchain per leader (--leader); why.py <EVM address> -> his leader view with xchain fills")
+    print("whatif_xchain per leader (--leader) + entry-gap filter; xchain_report per leader/chain; "
+          "why.py <EVM address>")
 
 
 async def main():
@@ -268,6 +320,7 @@ async def main():
     await payout_stream_tests()
     await ladder_tests()
     await paper_multi_tests()
+    await lagging_node_tests()
     await rpc_fallback_tests()
     await wiring_tests()
     await report_tests()
