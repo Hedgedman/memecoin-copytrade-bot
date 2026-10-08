@@ -2,7 +2,8 @@
 
 Checks the things that must hold before a start - paper flag, leaders / leader_allowlist / leader_status,
 allowed_venues vs pool venues, exits, size and limits, and the live-only rules (no leader_profiles, no xchain
-paper trading, a wallet key source). --live additionally demands paper: false. Prints a summary (hosts only,
+paper trading, a wallet key source), and that the RPC URLs are not in the config in plain text (rpc_http_secret /
+rpc_ws_secret: keychain items, resolved like the bot does). --live additionally demands paper: false. Prints a summary (hosts only,
 never the RPC URLs with the API key) and exits 1 on any problem."""
 from __future__ import annotations
 
@@ -12,6 +13,8 @@ import sys
 from urllib.parse import urlsplit
 
 import yaml
+
+from bot.secrets import resolve_rpc
 
 MODES = ("cost", "entry_price")
 
@@ -38,9 +41,16 @@ def validate(cfg: dict, want_live: bool = False) -> tuple[list[str], list[str]]:
         if name != "solana" and c.get("enabled"):
             bad.append(f"chains.{name}: enabled (H8-LIVE is Solana only)")
     for k in ("rpc_http", "rpc_ws"):
+        ref = sol.get(f"{k}_secret")
         if not sol.get(k):
-            bad.append(f"chains.solana.{k} missing")
-    out.append(f"rpc: {host(sol.get('rpc_http', ''))} / {host(sol.get('rpc_ws', ''))}, detection {sol.get('detection', 'auto')}")
+            bad.append(f"chains.solana.{k} missing" + (f" (secret {ref} not in the env / keychain)" if ref else ""))
+        elif not ref and "api-key" in sol[k].lower():
+            bad.append(f"chains.solana.{k}: API key in plain text in the config - put the URL in the keychain and "
+                       f"reference it with {k}_secret")
+    src = lambda k: f"secret {sol[k + '_secret']}" if sol.get(k + "_secret") else "config"
+    out.append(f"rpc: {host(sol.get('rpc_http', ''))} ({src('rpc_http')}) / {host(sol.get('rpc_ws', ''))} "
+               f"({src('rpc_ws')}), detection {sol.get('detection', 'auto')}, jupiter_max_rps "
+               f"{float(sol.get('jupiter_max_rps', 1.0)):g}, pumpswap_fee_bps {sol.get('pumpswap_fee_bps', 30)}")
     leaders = sol.get("leaders") or []
     if not leaders:
         bad.append("chains.solana.leaders is empty")
@@ -147,6 +157,8 @@ def main():
     ap.add_argument("--live", action="store_true", help="demand paper: false")
     a = ap.parse_args()
     cfg = yaml.safe_load(open(a.config))
+    sol = (cfg.get("chains") or {}).get("solana") or {}
+    resolve_rpc(sol)           # rpc_*_secret -> URL from the env / keychain, as the bot does at start (never printed)
     bad, out = validate(cfg, a.live)
     print(f"config {a.config}:")
     for line in out:

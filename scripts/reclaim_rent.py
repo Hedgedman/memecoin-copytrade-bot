@@ -27,7 +27,7 @@ from solders.message import Message
 from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
-from bot.secrets import get_secret
+from bot.secrets import get_secret, resolve_rpc
 
 TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
@@ -47,7 +47,10 @@ def rpc(url: str, method: str, params: list):
 
 
 def load_config(path: str) -> dict:
-    return yaml.safe_load(open(path))
+    """config.yaml with chains.solana.rpc_http / rpc_ws resolved from the keychain (rpc_*_secret)."""
+    cfg = yaml.safe_load(open(path))
+    resolve_rpc(((cfg.get("chains") or {}).get("solana")) or {})
+    return cfg
 
 
 def load_keypair(sol_cfg: dict) -> Keypair:

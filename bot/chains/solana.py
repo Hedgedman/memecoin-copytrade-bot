@@ -24,6 +24,7 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import aiohttp
 import websockets
@@ -31,7 +32,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 from ..models import Fill, Position, Signal
-from ..secrets import get_secret
+from ..secrets import get_secret, resolve_rpc, rpc_source
 from ..pricing.pools import (AccountHub, PoolState, PUMP_PROGRAM, PUMPSWAP_PROGRAM,
                              curve_pda, decode_curve, decode_pumpswap_virtual, decode_token_amount,
                              find_pool_vaults, pumpswap_state)
@@ -231,6 +232,13 @@ class SolanaAdapter(ChainAdapter):
     def __init__(self, cfg: dict, paper: bool):
         self.cfg = cfg
         self.paper = paper
+        # rpc_http / rpc_ws: plain URL, or rpc_http_secret / rpc_ws_secret = keychain item (Helius URL incl. API key,
+        # Oct 9 2026). Resolved into cfg so everything reading chains.solana later (xchain watcher) sees the URL.
+        resolve_rpc(cfg)
+        for k in ("rpc_http", "rpc_ws"):
+            if not cfg.get(k):
+                raise ValueError(f"chains.solana.{k}: not set and {rpc_source(cfg, k)} gave nothing "
+                                 f"(security add-generic-password -a copybot -s {cfg.get(k + '_secret') or 'NAME'} -w ... -U)")
         self.rpc = cfg["rpc_http"]
         self.ws_url = cfg["rpc_ws"]
         self.leaders: list[str] = cfg["leaders"]
@@ -313,7 +321,8 @@ class SolanaAdapter(ChainAdapter):
         self._tasks: list[asyncio.Task] = []
         # ---
         self._sol_usd_val, self._sol_usd_ts = 0.0, 0.0
-        self.throttle = _Throttle(float(cfg.get("jupiter_max_rps", 1.0)))
+        self.throttle_rps = float(cfg.get("jupiter_max_rps", 1.0))
+        self.throttle = _Throttle(self.throttle_rps)
         self.kp: Keypair | None = None
         # the wallet key: the env var named by private_key_env, else (private_key_keychain: true) the macOS keychain
         # item of the same name (account copybot, see bot/secrets.py). The value is never logged.
@@ -350,6 +359,10 @@ class SolanaAdapter(ChainAdapter):
         self._tasks.append(asyncio.create_task(self._corr_loop()))
         log.info("pool pricing for %s (fees bps %s), paper fill delay %.2fs",
                  sorted(self.pool_venues), self.fee_bps, self.paper_delay)
+        if "pumpswap_amm" in self.pool_venues:
+            log.info("PumpSwap: priced on quote vault + virtual_quote_reserves (pool account subscribed with the vaults)")
+        log.info("RPC host %s from %s, websocket from %s; Jupiter max %.1f req/s", urlsplit(self.rpc).hostname,
+                 rpc_source(self.cfg, "rpc_http"), rpc_source(self.cfg, "rpc_ws"), self.throttle_rps)
 
     async def close(self):
         self._stop.set()

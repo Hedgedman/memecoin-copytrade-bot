@@ -3,6 +3,7 @@
 get_secret(name): the env var wins; else `security find-generic-password -a copybot -s NAME -w` (never run here:
 subprocess.run is faked); a missing item or a failing command gives '' without raising; the value is not logged.
 The xchain watcher reads RELAY_API_KEY through it."""
+import json
 import logging
 import os
 import subprocess
@@ -60,8 +61,57 @@ def main():
         secrets.subprocess.run = real
     print("secrets: env first, keychain (account copybot, service = name) second, failures -> '', value never logged, "
           "watcher wired")
-    print("ALL PASSED")
+
+
+def test_rpc():
+    """Oct 9 2026: Helius URLs (with the API key) from the keychain via chains.solana.rpc_http_secret / rpc_ws_secret."""
+    from bot.chains.solana import SolanaAdapter
+    from scripts.check_config import validate
+    http, ws = "https://rpc.example/?api-key=SECRET-xyz", "wss://rpc.example/?api-key=SECRET-xyz"
+    real = secrets.subprocess.run
+    secrets.subprocess.run = FakeRun({("copybot", "HELIUS_RPC_HTTP"): http, ("copybot", "HELIUS_RPC_WS"): ws})
+    seen = []
+    h = logging.Handler(); h.emit = lambda r: seen.append(r.getMessage())
+    for name in ("secrets", "solana"):
+        logging.getLogger(name).addHandler(h); logging.getLogger(name).setLevel(logging.INFO)
+    try:
+        for k in ("HELIUS_RPC_HTTP", "HELIUS_RPC_WS"):
+            os.environ.pop(k, None)
+        sol = {"rpc_http_secret": "HELIUS_RPC_HTTP", "rpc_ws_secret": "HELIUS_RPC_WS"}
+        if secrets.sys.platform == "darwin":
+            assert secrets.resolve_rpc(dict(sol)) | {} == sol | {"rpc_http": http, "rpc_ws": ws}
+            a = SolanaAdapter(dict(sol, leaders=[], paper_land_delay_s=0), paper=True)
+            assert (a.rpc, a.ws_url) == (http, ws)
+        # a plain URL in the config wins (tests / other folders keep working)
+        assert secrets.resolve_rpc({"rpc_http": "http://x", "rpc_http_secret": "HELIUS_RPC_HTTP"})["rpc_http"] == "http://x"
+        assert secrets.rpc_source(sol) == "secret HELIUS_RPC_HTTP" and secrets.rpc_source({}) == "config"
+        # missing item -> clear error naming the item, no URL
+        secrets.subprocess.run = FakeRun({})
+        try:
+            SolanaAdapter(dict(sol, leaders=[]), paper=True)
+            raise AssertionError("adapter started without an RPC URL")
+        except ValueError as e:
+            assert "HELIUS_RPC_HTTP" in str(e), e
+        assert all("SECRET-xyz" not in m for m in seen), seen
+        # check_config: plain-text API key is a problem; a secret reference is fine; missing secret is a problem
+        base = {"paper": True, "exits": {}, "risk": {}, "chains": {"solana": {"enabled": True, "leaders": ["L"],
+                                                                         "buy_amount": 0.5, "daily_loss_limit": 1}}}
+        def problems(sol_extra):
+            cfg = json.loads(json.dumps(base)); cfg["chains"]["solana"].update(sol_extra)
+            return [b for b in validate(cfg)[0] if "rpc" in b]
+        assert any("plain text" in b for b in problems({"rpc_http": http, "rpc_ws": ws}))
+        assert problems({"rpc_http": http, "rpc_ws": ws, "rpc_http_secret": "HELIUS_RPC_HTTP",
+                         "rpc_ws_secret": "HELIUS_RPC_WS"}) == []
+        assert any("HELIUS_RPC_WS" in b for b in problems({"rpc_http": "http://x", "rpc_ws_secret": "HELIUS_RPC_WS"}))
+    finally:
+        secrets.subprocess.run = real
+        for name in ("secrets", "solana"):
+            logging.getLogger(name).removeHandler(h)
+    print("rpc from the keychain: resolved, plain URL wins, missing item -> clear error, never logged, check_config flags "
+          "plain-text keys")
 
 
 if __name__ == "__main__":
     main()
+    test_rpc()
+    print("ALL PASSED")

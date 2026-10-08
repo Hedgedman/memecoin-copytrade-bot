@@ -7,8 +7,10 @@ log_level: INFO
 chains:
   solana:
     enabled: true
-    rpc_http: "https://YOUR-RPC-PROVIDER"      # paid RPC (Helius/Triton/...) strongly advised
-    rpc_ws: "wss://YOUR-RPC-PROVIDER"
+    rpc_http: "https://YOUR-RPC-PROVIDER"      # paid RPC (Helius/Triton/...) strongly advised. A URL with an API key:
+    rpc_ws: "wss://YOUR-RPC-PROVIDER"          # keep it out of the config, use the two lines below instead
+    # rpc_http_secret: HELIUS_RPC_HTTP         # keychain item (account copybot), read at start, never logged:
+    # rpc_ws_secret: HELIUS_RPC_WS             #   security add-generic-password -a copybot -s HELIUS_RPC_HTTP -w '<url>' -U
     private_key_env: SOL_PRIVATE_KEY            # base58 key of a DEDICATED bot wallet
     private_key_keychain: false  # true: read it from the macOS keychain (security find-generic-password -a copybot -s SOL_PRIVATE_KEY) if not in the env
     jupiter_base: "https://lite-api.jup.ag/swap/v1"   # verify current Jupiter endpoint
@@ -40,7 +42,7 @@ chains:
     vault_check_s: 20        # re-calibrate open vault-priced positions this often
     pool_pricing_venues: [pumpfun_curve, pumpswap_amm]   # remove one to fall back to Jupiter for it
     pumpfun_fee_bps: 125     # CALIBRATE with calibrate.py - fee models change
-    pumpswap_fee_bps: 30     # CALIBRATE with calibrate.py
+    pumpswap_fee_bps: 120    # lp 20 + protocol 5 + creator 95 (Oct 2026); CALIBRATE with calibrate.py
     paper_land_delay_s: 1.5  # paper: fill on the pool state this long after deciding (live tx landing time)
     tick_tail_s: 900         # keep recording pool updates 15 min after a close or skip (uncensored what-ifs)
     max_watched_pools: 60    # cap on websocket subscriptions; open positions are never dropped

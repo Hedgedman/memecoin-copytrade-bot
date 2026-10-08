@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 import aiohttp
 import yaml
 
+from bot.secrets import resolve_rpc
 from bot.chains.solana import (USDC, USDT, WSOL, LAMPORTS, parse_stable_swap, parse_wallet_swap,
                                venues_in_tx)
 
@@ -309,7 +310,7 @@ def main():
     ap.add_argument("--cache", default="data/txcache")
     ap.add_argument("--refresh", action="store_true", help="re-download cached txs")
     a = ap.parse_args()
-    url = yaml.safe_load(open(a.config))["chains"]["solana"]["rpc_http"]
+    url = resolve_rpc(yaml.safe_load(open(a.config))["chains"]["solana"])["rpc_http"]
     t0 = time.time()
     txs, holdings = asyncio.run(fetch(url, a.wallet, a.limit, os.path.join(a.cache, a.wallet[:8]), a.refresh))
     print(f"fetched {len(txs)} txs in {time.time() - t0:.1f}s", file=sys.stderr)

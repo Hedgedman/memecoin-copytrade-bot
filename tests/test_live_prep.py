@@ -247,6 +247,7 @@ def keychain_tests():
 
 def check_config_tests():
     live = {"paper": False, "chains": {"solana": {"enabled": True, "rpc_http": "https://h/?api-key=SECRET", "rpc_ws": "wss://h/?api-key=SECRET",
+            "rpc_http_secret": "HELIUS_RPC_HTTP", "rpc_ws_secret": "HELIUS_RPC_WS",     # resolved from the keychain
             "leaders": [A, B], "leader_allowlist": [A], "allowed_venues": ["pumpfun_curve", "pumpswap_amm"], "buy_amount": 1.0,
             "daily_loss_limit": 2.0, "private_key_keychain": True, "pool_pricing_venues": ["pumpfun_curve", "pumpswap_amm"]}},
             "exits": {"take_profit": 0.3, "stop_loss": 0.2, "stop_basis": "entry_price", "trailing_pct": 0, "max_hold_s": 0,
@@ -268,6 +269,7 @@ def check_config_tests():
     assert validate(broken(leader_profiles__x={"mode": "mirror"}), True)[0]
     assert validate(broken(xchain__paper_trading={"enabled": True}), True)[0]
     assert validate(broken(exits__stop_loss=0), True)[0]
+    assert validate(broken(sol__rpc_http_secret=None), True)[0]        # API key in plain text in the config
     c = copy.deepcopy(live); c["paper"] = True
     assert validate(c, True)[0] and not validate(c, False)[0]
     print("check_config: live config validated, secrets kept out of the summary, bad configs flagged")
