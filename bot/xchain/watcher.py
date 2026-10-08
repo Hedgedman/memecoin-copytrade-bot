@@ -36,6 +36,7 @@ from collections import OrderedDict
 
 import aiohttp
 
+from ..secrets import get_secret
 from .relay import (FINAL, RateLimiter, RelayClient, XTrade, memo_request_ids, parse_price, parse_request,
                     price_body, relay_tx_kind, USDC_SOL)
 
@@ -84,7 +85,8 @@ class XchainWatcher:
         self.payout_stream = bool(cfg.get("payout_stream", True)) and bool(ws_url)
         self.ws_url = ws_url
         self.limiter = RateLimiter(int(cfg.get("max_relay_calls_per_min", 100)))
-        self.key = os.environ.get(cfg.get("api_key_env", "RELAY_API_KEY"), "")
+        # env var first, else the macOS keychain item (account "copybot", service = the var name; bot/secrets.py)
+        self.key = get_secret(cfg.get("api_key_env", "RELAY_API_KEY"))
         # EVM RPC per chain: env var (e.g. Alchemy) first, the public URL as fallback
         public = cfg.get("rpc_public") or {}
         self.rpc: dict[str, str] = {}
@@ -426,7 +428,9 @@ class XchainWatcher:
         chains = [c for c, u in self.rpc.items() if u]
         log.info("xchain watch-only for %d leaders (%d known EVM addresses); Relay key %s, max %d calls/min; "
                  "payout stream %s; EVM RPC on %s", len(self.sol_leaders),
-                 sum(len(v) for v in self.addresses.values()), "set" if self.key else "MISSING",
+                 sum(len(v) for v in self.addresses.values()),
+                 "MISSING" if not self.key else "set (env)" if os.environ.get(self.cfg.get("api_key_env", "RELAY_API_KEY"))
+                 else "set (keychain)",
                  self.limiter.per_window, "on" if self.payout_stream else "off", chains or "none")
         # full history refresh right away only if a leader has no known address yet (saves ~140 calls/restart)
         first_refresh = 0 if any(not v for v in self.addresses.values()) else 600
