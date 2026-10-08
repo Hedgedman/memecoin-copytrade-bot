@@ -112,7 +112,7 @@ class FakeSol:
 async def solana_sizing_tests():
     cfg = {"paper": True, "db_path": tempfile.mktemp(), "chains": {"solana": {
         "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [P_LEADER, OTHER],
-        "buy_amount": 2.0, "max_signal_age_s": 999}}, "risk": {"max_open_positions": 10, "reentry_cooldown_s": 0},
+        "buy_amount": 2.0, "max_signal_age_s": 999}}, "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 10, "reentry_cooldown_s": 0},
         "exits": {}, "leader_profiles": {P_LEADER: PROFILE}}
     b = Bot(cfg)
     a = FakeSol()

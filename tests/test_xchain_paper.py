@@ -230,11 +230,11 @@ async def stop_and_limits_tests():
     os.remove(t.kill)
     assert pos(store, TOK3) is None
     # resume: open xchain positions come back in the trader, not in the Solana resume
-    t2 = XchainPaperTrader({"chains": ["robinhood"]}, store, True, {W: EVM})
+    t2 = XchainPaperTrader({"chains": ["robinhood"]}, store, True, {W: EVM}, kill_switch_file=tempfile.mktemp())
     assert list(t2.positions) == [("robinhood", TOK2, W)]
     assert store.load_open(True, chains={"solana": None}) == []
     try:
-        XchainPaperTrader({}, store, False, {W: EVM})
+        XchainPaperTrader({}, store, False, {W: EVM}, kill_switch_file=tempfile.mktemp())
         raise AssertionError("must refuse paper: false")
     except ValueError:
         pass
@@ -245,13 +245,13 @@ async def wiring_tests():
     def cfg(paper, enabled):
         return {"paper": paper, "db_path": tempfile.mktemp(), "chains": {"solana": {
             "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [W], "buy_amount": 0.5}},
-            "risk": {"max_open_positions": 4}, "exits": {},
+            "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 4}, "exits": {},
             "xchain": {"enabled": True, "leaders": {W: EVM}, "paper_trading": {"enabled": enabled}}}
     assert Bot(cfg(True, False)).xchain.trader is None                     # default off
     assert isinstance(Bot(cfg(True, True)).xchain.trader, XchainPaperTrader)
     # watcher -> trader: a recorded Relay buy (real v3 request, fresh timestamp) opens a paper position
     store = Store(tempfile.mktemp())
-    t = XchainPaperTrader({"entry_delay_s": 0}, store, True, {W: EVM})
+    t = XchainPaperTrader({"entry_delay_s": 0}, store, True, {W: EVM}, kill_switch_file=tempfile.mktemp())
     relay = FakeRelay()
     req = fresh(REQS[0])                                                    # MININGMART on robinhood
     tok = req["data"]["route"]["actual"]["destination"]["outputCurrency"]["currency"]["address"]

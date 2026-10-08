@@ -23,7 +23,7 @@ async def test_bot_skips():
     cfg = {"paper": True, "db_path": tempfile.mktemp(), "chains": {"solana": {
         "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [W], "buy_amount": 0.5,
         "only_first_leader_buy": True, "max_signal_age_s": 999}},
-        "risk": {"max_open_positions": 4, "reentry_cooldown_s": 0}, "exits": {}}
+        "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 4, "reentry_cooldown_s": 0}, "exits": {}}
     bot = Bot(cfg)
     checked = []
     async def fake_check(token, amount, ref_price=None):

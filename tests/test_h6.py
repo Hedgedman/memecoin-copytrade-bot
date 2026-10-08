@@ -41,7 +41,7 @@ def config_tests():
     assert normal_exits_from(None) is None
     cfg = {"paper": True, "db_path": tempfile.mktemp(), "chains": {"solana": {
         "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [W], "buy_amount": 0.5}},
-        "risk": {}, "exits": {"take_profit": 0.30, "stop_loss": 0.20, "stop_basis": "entry_price"},
+        "risk": {"kill_switch_file": tempfile.mktemp()}, "exits": {"take_profit": 0.30, "stop_loss": 0.20, "stop_basis": "entry_price"},
         "xchain": {"enabled": True, "paper_trading": {"enabled": True, "max_hold_h": 48}}}
     tr = Bot(cfg).xchain.trader
     assert tr.normal_exits["take_profit"] == 0.3 and tr.normal_exits["max_hold_s"] == 48 * 3600

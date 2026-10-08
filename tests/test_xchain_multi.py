@@ -269,7 +269,7 @@ async def rpc_fallback_tests():
 async def wiring_tests():
     cfg = {"paper": True, "db_path": tempfile.mktemp(), "chains": {"solana": {
         "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [W, L2], "buy_amount": 0.5}},
-        "risk": {"max_open_positions": 4}, "exits": {},
+        "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 4}, "exits": {},
         "xchain": {"enabled": True, "leaders": {W: EVM}, "paper_trading": {"enabled": True}}}
     b = Bot(cfg)
     assert b.xchain.sol_leaders == [W, L2] and b.xchain.trader.leaders == {W, L2}

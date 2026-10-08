@@ -137,7 +137,7 @@ async def bot_fraction_tests():
     """Bot.consume: the fraction comes from his sell tx (sold / pre-balance); unknown pre-balance = all."""
     cfg = {"paper": True, "db_path": tempfile.mktemp(), "chains": {"solana": {
         "enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x", "leaders": [M_LEADER],
-        "buy_amount": 2.0, "max_signal_age_s": 999}}, "risk": {"max_open_positions": 10, "reentry_cooldown_s": 0},
+        "buy_amount": 2.0, "max_signal_age_s": 999}}, "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 10, "reentry_cooldown_s": 0},
         "exits": {"follow_leader_exit": False}, "leader_profiles": {M_LEADER: MIRROR}}
     b = Bot(cfg)
     b.adapters["solana"] = FakeSol()

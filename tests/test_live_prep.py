@@ -250,7 +250,7 @@ def check_config_tests():
             "leaders": [A, B], "leader_allowlist": [A], "allowed_venues": ["pumpfun_curve", "pumpswap_amm"], "buy_amount": 1.0,
             "daily_loss_limit": 2.0, "private_key_keychain": True, "pool_pricing_venues": ["pumpfun_curve", "pumpswap_amm"]}},
             "exits": {"take_profit": 0.3, "stop_loss": 0.2, "stop_basis": "entry_price", "trailing_pct": 0, "max_hold_s": 0,
-                      "follow_leader_exit": False}, "risk": {"max_open_positions": 4, "reentry_cooldown_s": 0}}
+                      "follow_leader_exit": False}, "risk": {"kill_switch_file": tempfile.mktemp(), "max_open_positions": 4, "reentry_cooldown_s": 0}}
     bad, out = validate(live, want_live=True)
     assert bad == [], bad
     text = "\n".join(out)

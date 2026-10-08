@@ -278,7 +278,7 @@ async def xchain_tests():
     relay.price_usd[TOK3] = 0.03
     await t.mark_once(); await settle(t)
     assert q.timing["ladder_fired"] == [10, 25]
-    t2 = XchainPaperTrader({"chains": ["robinhood"]}, store, True, [P_LEADER], profiles=profiles())
+    t2 = XchainPaperTrader({"chains": ["robinhood"]}, store, True, [P_LEADER], profiles=profiles(), kill_switch_file=tempfile.mktemp())
     assert t2.positions[("robinhood", TOK3, P_LEADER)].timing["ladder_fired"] == [10, 25]
     print("xchain: profile outside the 1 open / 1 per leader limits, own max_open_tokens, ladder once per level, "
           "mirror + stop on the rest, state persists")
