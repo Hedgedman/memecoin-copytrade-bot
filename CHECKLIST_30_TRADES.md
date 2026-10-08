@@ -43,7 +43,7 @@ HYPOTHESIS 3 (Oct 06 10:53) replaces H2: mc 30k-500k, stop -20%, trailing 30% af
   Check: python whatif_xchain.py --profile trail_Leader-B --list ; python whatif_ticksv2.py --profile trail_Leader-B ;
          python -m scripts.xchain_report --all
 - Oct 07 (PAPER only): leader profile mirror_Leader-A for Leader-A (config leader_profiles),
-  active from the first restart with this code (restart time: ________).
+  active from the first restart with this code (restart time: 2026-10-08 15:43).
   Mode mirror: copy his buys AND his sells pro rata (he sells X% of his holding -> we sell X% of ours) on Solana
   (fraction = sold / his pre-balance in his sell tx) and xchain Robinhood/BSC (Relay + DEX sells, as the default leaders).
   No TP, no trailing. Safety stop -60% on the cost of what we still hold (replaces the global -20% Solana stop and the
@@ -63,12 +63,12 @@ HYPOTHESIS 3 (Oct 06 10:53) replaces H2: mc 30k-500k, stop -20%, trailing 30% af
 HYPOTHESIS 4 (paper, from ID 230; see REVIEW_2026-10-07_night.md): the paper bot's global exits TP +30% / stop -20%,
   judged without Leader-G, on later trades only (150-trade threshold; +7.1%/trade in the model on the first 38).
   Count only positions without timing.profile. Profile leaders (trail_Leader-B since Oct 7 21:46, mirror_Leader-A since
-  restart ____) are evaluated separately. whatif_ticksv2.py drops them by default and lists them (id, leader, profile).
+  restart 2026-10-08 15:43) are evaluated separately. whatif_ticksv2.py drops them by default and lists them (id, leader, profile).
   Check: python whatif_ticksv2.py --from-id 230
 HYPOTHESIS 5 (paper, from ID 230): the venue split of the same positions (pool / vault / Jupiter-priced classes in
   whatif_ticksv2.py VENUE SPLIT) - does the result hold on the Jupiter-priced trades the pool model can't see?
   Count only positions without timing.profile. Profile leaders (trail_Leader-B since Oct 7 21:46, mirror_Leader-A since
-  restart ____) are evaluated separately.
+  restart 2026-10-08 15:43) are evaluated separately.
   Check: python whatif_ticksv2.py --from-id 230   (venue split at the end; --no-exclude-profiles to include them)
 
 ---- Oct 8 2026 (night build, see BUILD_NOTES_2026-10-08.md; restart pending) ----
@@ -80,7 +80,7 @@ DATA RULE: positions with a single-step mark change > 50% are excluded from ALL 
   (timing.flagged) - those count too.
 HYPOTHESIS 6 (paper, EVM normal leaders): Robinhood/BSC positions of NON-profile leaders use the global exits:
   TP +30% on cost, stop -20% from the first Relay quote after the fill, max hold 48 h, his sells IGNORED
-  (timing.exits.rule = "H6"). Starts at restart ____________ (date/time), commit ____________.
+  (timing.exits.rule = "H6"). Starts at restart 2026-10-08 15:43 (from id 366), commit 8bba0c9.
   Count: EVM positions opened after that WITHOUT timing.profile (= with timing.exits.rule "H6"):
     sqlite3 copybot.db "SELECT COUNT(*), SUM(status='closed'), ROUND(SUM(CASE WHEN status='closed' THEN exit_value-cost END),0)
       FROM positions WHERE chain!='solana' AND timing LIKE '%\"rule\": \"H6\"%';"
@@ -92,12 +92,12 @@ mirror_ladder_Leader-B (paper, runner test) for Leader-B: his buys AND adds
   copied at 0.219x (cap $1,000/token incl. adds, min $25), his sells mirrored pro rata, PLUS own ladder: sell
   25% of the current holding at 10x / 25x / 50x / 100x our average entry (each once; adds raise the average),
   safety stop -60% on the cost of what we still hold, no trailing, no TP. Own limits: 10 open tokens, $500/day.
-  Starts at restart ____________. Kill if after 100 positions the average loss on positions WITHOUT a 10x is
+  Starts at restart 2026-10-08 15:43 (from id 366). Kill if after 100 positions the average loss on positions WITHOUT a 10x is
   worse than -40%, or after 200 positions no token reached 10x. Review at 6 months. NOT judged on "w/o best 3".
   Check: python whatif_ticksv2.py --profile mirror_ladder_Leader-B ; python whatif_xchain.py --profile mirror_ladder_Leader-B --list
          sqlite3 copybot.db "SELECT id, chain, status, ROUND(cost,2), ROUND(exit_value,2), exit_reason, json_extract(timing,'$.ladder_fired')
            FROM positions WHERE timing LIKE '%mirror_ladder_Leader-B%' ORDER BY id;"
-mirror_Leader-A (paper) for Leader-A: enabled at restart ____________ with
+mirror_Leader-A (paper) for Leader-A: enabled at restart 2026-10-08 15:43 (from id 366) with
   mode mirror, his buys AND adds copied at 0.400x (cap $1,000/token incl. adds, min $25), his sells mirrored
   pro rata, stop -60% on the rest, marks every 30 s, 10 open tokens, $500/day. (Fill the "restart ____" blanks
   of the Oct 7 mirror_Leader-A entry above with the same time.) Pre-registered test unchanged: ~30 new tokens,
@@ -110,7 +110,7 @@ LEADER SELECTION rules (scripts/leader_selection.py, Solana + xchain combined, f
   WATCH   = everything else. The script prints which rule fired.
   Leader status (config chains.solana.leader_status): active = paper trades; watch = signals, entry gaps and
   post-signal price paths recorded, NO positions on any chain, never blocks a token.
-  Leader-C = watch since restart ____________ (gap +30% over 7 entries).
+  Leader-C = watch since restart 2026-10-08 15:43 (gap +30% over 7 entries).
   First run Oct 8 (whole history, SOL $200): CUT Leader-Q (gap +48%/27), Leader-D (20 closed, w/o best -$672,
   avg -6.5%), Leader-O (gap +39%), Leader-P (gap +20%); 0 PROMOTE. Not acted on (judge at 8-10+ trades).
 trail_Leader-B: closed Oct 8 2026, replaced by mirror_ladder_Leader-B (0 positions were opened under trail_Leader-B).
