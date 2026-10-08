@@ -13,6 +13,14 @@ Positions opened under a leader profile (bot/profiles.py, timing["profile"]) are
 ran other exits and sizes, so they would pollute a hypothesis on the global exits. The excluded ones are
 listed (id, leader, profile). --profile NAME looks at one profile only ('default' = positions without one).
 
+DATA RULE (scripts/flags.py): positions with an unconfirmed single-step mark change > 50% are excluded by
+default and listed; --include-flagged keeps them. A tick series must COVER our entry (first tick within
+--cover-s of the fill), otherwise the position is "not replayable" (a series that starts after our close
+would replay someone else's trade). All ticks after our close are used (up to --max-after).
+Old positions whose raw ticks were compacted (scripts/compact_ticks.py) replay on 1-minute OHLC bars
+(ticks_1m: 4 points per minute - open, low/high, close): exits land at minute precision, the peak is
+the bar high, so results are coarser than on raw ticks; their count is printed.
+
 Exit styles compared
   fixed     sell everything at +TP, or at the stop                (what the bot does now)
   trailing  once up +A%, sell everything when value falls X% from its peak; stop before that
@@ -43,6 +51,7 @@ from dataclasses import dataclass
 import yaml
 
 from bot.pricing.pools import PoolState
+from scripts.flags import flagged_note, flagged_positions
 
 L = 1_000_000_000
 FIXED_TPS = [0.10, 0.20, 0.30, 0.50, 1.00, 2.00, 4.00]          # +100% = 2x, +200% = 3x, +400% = 5x
@@ -64,6 +73,7 @@ class Pos:
     series: list         # [(ts, PoolState, fee_bps, factor)]  factor = real value / pool-model value
     factor: float = 1.0  # kept for compatibility
     leader_exit: float | None = None   # when the bot saw the leader's first sell after our entry
+    resolution: str = "tick"           # "tick" = raw pool updates, "1m" = compacted 1-minute bars
 
 
 def shifted(st: PoolState, net_in: int) -> PoolState:
@@ -122,28 +132,67 @@ def keep_profile(timing, profile: str = "", exclude_profiles: bool = False) -> b
     return not (exclude_profiles and prof != "default")
 
 
+def bars_to_ticks(rows):
+    """ticks_1m rows -> pseudo ticks: open at ts, low and high (further-from-open one last) at +20/+40 s, close at
+    +59 s. Only the close carries real_* reserves; open/high/low use the close's (curve caps are approximate)."""
+    out = []
+    for ts, venue, n, to, so, th, sh, tl, sl, tc, sc, rtc, rsc in rows:
+        rt = None if rtc is None else int(rtc)
+        rs = None if rsc is None else int(rsc)
+        p_open, p_hi, p_lo = int(so) / int(to), int(sh) / int(th), int(sl) / int(tl)
+        mid = [(ts + 20, int(tl), int(sl)), (ts + 40, int(th), int(sh))]
+        if abs(p_hi - p_open) < abs(p_lo - p_open):          # the move closer to the open probably came first
+            mid = [(ts + 20, int(th), int(sh)), (ts + 40, int(tl), int(sl))]
+        for t, tok, sol in [(ts, int(to), int(so))] + mid + [(ts + 59, int(tc), int(sc))]:
+            out.append((t, venue, tok, sol, rt, rs))
+    return out
+
+
 def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile="",
-         exclude_profiles=False):
-    """-> (positions, skipped, mc_out, excluded): excluded = [(id, leader, profile)] dropped by the profile filter."""
+         exclude_profiles=False, cover_s=30.0, exclude_flagged=True):
+    """-> (positions, skipped, mc_out, excluded, dropped): excluded = [(id, leader, profile)] dropped by the
+    profile filter; dropped = {"not_covered": [(id, seconds between fill and first tick)],
+    "flagged": [(id, leader, reason)], "bars_1m": [ids replayed on 1-minute bars]}."""
     # read-only, so it is safe to point --db at the live bot's database while it runs
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
+    flagged = flagged_positions(db) if exclude_flagged else {}
     rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader, timing FROM positions WHERE paper=? "
                       "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
     excluded = [(r[0], r[5], profile_of(r[6])) for r in rows if not keep_profile(r[6], profile, exclude_profiles)]
-    rows = [r[:6] for r in rows if keep_profile(r[6], profile, exclude_profiles)]
+    rows = [r for r in rows if keep_profile(r[6], profile, exclude_profiles)]
+    dropped = {"not_covered": [], "flagged": [(r[0], r[5], flagged[r[0]]) for r in rows if r[0] in flagged],
+               "bars_1m": []}
+    rows = [r for r in rows if r[0] not in flagged]
     out, skipped, mc_out = [], 0, 0
-    for pid, token, amount, cost, opened, leader in rows:
+    has_bars = bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='ticks_1m'").fetchone())
+    for pid, token, amount, cost, opened, leader, timing in rows:
         if min_mc is not None or max_mc is not None:
             mc = entry_mc(db, token, leader, opened)
             if mc is None or (min_mc is not None and mc < min_mc) or (max_mc is not None and mc >= max_mc):
                 mc_out += 1
                 continue
+        filled = json.loads(timing or "{}").get("filled_at") or opened
         ticks = db.execute("SELECT ts, venue, tok_res, sol_res, real_tok, real_sol FROM ticks WHERE token=? "
                            "AND ts>=? AND ts<=? ORDER BY ts", (token, opened, opened + max_after_s)).fetchall()
+        resolution, slack = "tick", 0.0
+        if has_bars and (not ticks or ticks[0][0] > filled + cover_s):
+            # compacted: 1-minute bars up to the first raw tick (or the whole window), raw ticks after that
+            until = ticks[0][0] if ticks else opened + max_after_s
+            bars = db.execute("SELECT ts, venue, n, tok_open, sol_open, tok_high, sol_high, tok_low, sol_low, tok_close, "
+                              "sol_close, real_tok_close, real_sol_close FROM ticks_1m WHERE token=? AND ts>=? AND ts<? "
+                              "ORDER BY ts", (token, opened - 60, until)).fetchall()
+            if bars:
+                ticks = [t for t in bars_to_ticks(bars) if opened - 60 <= t[0] < until] + ticks
+                resolution, slack = "1m", 60.0
         if not ticks:
             skipped += 1
             continue
+        if ticks[0][0] > filled + cover_s + slack:            # the series does not cover our entry
+            dropped["not_covered"].append((pid, round(ticks[0][0] - filled)))
+            continue
+        if resolution == "1m":
+            dropped["bars_1m"].append(pid)
         series = []
         for ts, venue, tr, sr, rt, rs in ticks:
             st = PoolState(venue, int(tr), int(sr), None if rt is None else int(rt), None if rs is None else int(rs))
@@ -178,13 +227,13 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
                         factor = m[1] / model
                 series = [(ts, st, fee, factor) for ts, st, fee, _ in series]
             out.append(Pos(pid, cost, int(amount), 0, series,
-                           leader_exit=leader_exit_ts(db, token, leader, opened)))
+                           leader_exit=leader_exit_ts(db, token, leader, opened), resolution=resolution))
             continue
         fee0 = series[0][2]
         entry = int((cost - paper_fee) * L)
         out.append(Pos(pid, cost, int(amount), entry * (10_000 - fee0) // 10_000, series,
-                       leader_exit=leader_exit_ts(db, token, leader, opened)))
-    return out, skipped, mc_out, excluded
+                       leader_exit=leader_exit_ts(db, token, leader, opened), resolution=resolution))
+    return out, skipped, mc_out, excluded, dropped
 
 
 def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee: float,
@@ -295,11 +344,13 @@ def venue_class(timing: dict, pos: "Pos | None") -> str:
     return "jupiter" if venue in ("jupiter", "live", "") else "vault"
 
 
-def venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile="", exclude_profiles=False):
+def venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile="", exclude_profiles=False,
+                 exclude_flagged=True):
     """Closed positions per pricing class: {class: [(id, cost, exit_value, exit_reason)]}, and the ones the
-    profile filter dropped: [(id, leader, profile)]. Same filters as load()."""
+    profile filter dropped: [(id, leader, profile)]. Same filters as load() (flagged positions dropped too)."""
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
+    flagged = flagged_positions(db) if exclude_flagged else {}
     by_id = {p.pid: p for p in data}
     groups, excluded = {c: [] for c, _ in VENUE_CLASSES}, []
     for pid, token, leader, cost, exitv, opened, reason, timing in db.execute(
@@ -307,6 +358,8 @@ def venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile="", exclu
             "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)):
         if not keep_profile(timing, profile, exclude_profiles):
             excluded.append((pid, leader, profile_of(timing)))
+            continue
+        if pid in flagged:
             continue
         if min_mc is not None or max_mc is not None:
             mc = entry_mc(db, token, leader, opened)
@@ -318,10 +371,10 @@ def venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile="", exclu
 
 
 def venue_split(db_path, from_id, live, data, min_mc, max_mc, styles, delay, fee, basis, part, confirm, hard,
-                profile="", exclude_profiles=False):
+                profile="", exclude_profiles=False, exclude_flagged=True):
     """Report-only: actual results and the what-if per pricing class (pool / vault / Jupiter)."""
     by_id = {p.pid: p for p in data}
-    groups, _ = venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile, exclude_profiles)
+    groups, _ = venue_groups(db_path, from_id, live, data, min_mc, max_mc, profile, exclude_profiles, exclude_flagged)
     print("\nVENUE SPLIT (report only): ACTUAL closed results per pricing class, and the what-if where replayable")
     hdr = f"  {'class':<8} {'n':>3} {'wins':>5} {'PnL SOL':>8} {'avg %':>6} {'median %':>8} {'stop fill med':>13}"
     print(hdr + "".join(f"{lbl[:22]:>24}" for lbl, _ in styles))
@@ -393,6 +446,10 @@ def main():
     ap.add_argument("--profile", default="", help="only positions opened under this leader profile ('default' = none)")
     ap.add_argument("--exclude-profiles", action=argparse.BooleanOptionalAction, default=True,
                     help="drop positions opened under any leader profile (default on; ignored with --profile)")
+    ap.add_argument("--include-flagged", action="store_true",
+                    help="keep positions the DATA RULE flags (unconfirmed single-step mark change > 50%%)")
+    ap.add_argument("--cover-s", type=float, default=30.0,
+                    help="a tick series must start within this many seconds of our fill to be replayable")
     ap.add_argument("--leader-sl", type=float, default=None,
                     help="extra safety-stop row for the leader-exit style, e.g. 0.4 (rows always include off/20/30/40/60%%)")
     args = ap.parse_args()
@@ -414,8 +471,18 @@ def main():
     basis = ex.get("stop_basis", "cost")
 
     excl = args.exclude_profiles and not args.profile
-    data, skipped, mc_out, excluded = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
-                                           args.max_after, args.min_mc, args.max_mc, args.live, args.profile, excl)
+    data, skipped, mc_out, excluded, dropped = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
+                                                    args.max_after, args.min_mc, args.max_mc, args.live, args.profile,
+                                                    excl, args.cover_s, not args.include_flagged)
+    print(flagged_note({pid: why for pid, _, why in dropped["flagged"]}, args.include_flagged))
+    for pid, leader, why in dropped["flagged"]:
+        print(f"  #{pid:<5} {leader[:8]}  {why}")
+    if dropped["not_covered"]:
+        print(f"not replayable (ticks start > {args.cover_s:g}s after our fill): "
+              + ", ".join(f"#{pid} (+{dt}s)" for pid, dt in dropped["not_covered"]))
+    if dropped["bars_1m"]:
+        print(f"{len(dropped['bars_1m'])} position(s) replayed on 1-minute bars (compacted ticks, minute precision): "
+              + ", ".join(f"#{pid}" for pid in dropped["bars_1m"]))
     if args.profile:
         print(f"profile filter: {args.profile}")
     elif excl:
@@ -520,7 +587,7 @@ def main():
     venue_split(args.db, args.from_id, args.live, data, args.min_mc, args.max_mc,
                 [("config exits", cur), ("fixed TP +30% / SL -20%", ("fixed", 0.30, 0, 0.20)),
                  ("trail 30%/+50% SL -20%", ("trailing", 0.50, 0.30, 0.20))],
-                delay, fee, basis, args.part, args.confirm, args.hard, args.profile, excl)
+                delay, fee, basis, args.part, args.confirm, args.hard, args.profile, excl, not args.include_flagged)
 
     print(f"\n{len(allres)} settings tested on {n} trades: the best one is partly luck (overfitting).")
     print("Before changing the bot: check the same setting is also good on LATER trades (--from-id).")

@@ -33,6 +33,13 @@ PUMPSWAP_PROGRAM = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
 WSOL = "So11111111111111111111111111111111111111112"
 
 _CURVE = struct.Struct("<QQQQQ?")   # after the 8-byte Anchor discriminator
+# BondingCurve layout (pump.fun IDL, pump-public-docs, checked Oct 8 2026):
+#   8 discriminator | virtual_token_reserves u64 | virtual_quote_reserves u64 | real_token_reserves u64 |
+#   real_quote_reserves u64 | token_total_supply u64 | complete bool | creator pubkey (49..81) |
+#   is_mayhem_mode bool (81) | is_cashback_coin bool (82) | quote_mint pubkey (83..115) | creator_fee_bps u64 | ...
+# Older curves are shorter (no quote_mint): they are SOL-quoted. A zero quote_mint also means SOL.
+_QUOTE_MINT_OFF = 83
+_WSOL_BYTES = bytes(Pubkey.from_string(WSOL))
 
 
 def curve_pda(mint: str) -> str:
@@ -57,6 +64,7 @@ class PoolState:
     complete: bool = False        # curve only: graduated, price moved elsewhere
     slot: int = 0
     recv_ts: float = 0.0
+    quote_mint: str | None = None  # curve only: a NON-SOL quote mint (reserves are in that token, not lamports)
 
     def lamports_per_raw(self) -> float:
         return self.sol_res / self.tok_res
@@ -91,13 +99,27 @@ class PoolState:
             real_sol=None if self.real_sol is None else self.real_sol + net)
 
 
+def curve_quote_mint(data: bytes) -> str | None:
+    """The curve's quote mint if it is NOT SOL (base58), else None. Short/legacy accounts and a zero
+    quote_mint are SOL-quoted. Verified on the 151-byte curve of 9TPazfktQJR5MyrdXNLy9WixRs9tZFCPtnjxoFfyUhWg
+    (quote J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr, 8 decimals): its 'SOL' reserves were ~32x off."""
+    end = _QUOTE_MINT_OFF + 32
+    if len(data) < end:
+        return None
+    q = data[_QUOTE_MINT_OFF:end]
+    if q == b"\0" * 32 or q == _WSOL_BYTES:
+        return None
+    return str(Pubkey.from_bytes(q))
+
+
 def decode_curve(data: bytes, slot: int = 0, recv_ts: float = 0.0) -> PoolState:
     if len(data) < 8 + _CURVE.size:
         raise ValueError(f"bonding curve account too short: {len(data)} bytes")
     vtok, vsol, rtok, rsol, _supply, complete = _CURVE.unpack_from(data, 8)
-    if vtok == 0 or vsol == 0:
+    quote = curve_quote_mint(data)
+    if (vtok == 0 or vsol == 0) and not complete:
         raise ValueError("empty curve")
-    return PoolState("pumpfun_curve", vtok, vsol, rtok, rsol, complete, slot, recv_ts)
+    return PoolState("pumpfun_curve", max(vtok, 1), max(vsol, 1), rtok, rsol, complete, slot, recv_ts, quote)
 
 
 def decode_token_amount(data: bytes) -> int:

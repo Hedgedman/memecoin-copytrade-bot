@@ -71,11 +71,11 @@ async def main():
     pos.id = store.open_position(pos); pos.status = "closed"; pos.exit_value = 0.5; pos.closed_at = 1100
     store.close_position(pos)
     store.record_ticks([(1000.0 + i, i, "M", "meteora_damm_v2", 300_000 * 10**9, 60 * L, None, None) for i in range(5)])
-    data, skipped, _ = load(store.path if hasattr(store, "path") else store.db.execute("PRAGMA database_list").fetchone()[2],
+    data, skipped, *_ = load(store.path if hasattr(store, "path") else store.db.execute("PRAGMA database_list").fetchone()[2],
                             1, {"meteora_damm_v2": 100}, 0.01, 3600)
     assert not data and skipped == 1                               # no calibration stored -> skipped
     store.record_factor("M", 999.0, 1.2)
-    data, skipped, _ = load(store.db.execute("PRAGMA database_list").fetchone()[2], 1, {"meteora_damm_v2": 100}, 0.01, 3600)
+    data, skipped, *_ = load(store.db.execute("PRAGMA database_list").fetchone()[2], 1, {"meteora_damm_v2": 100}, 0.01, 3600)
     assert len(data) == 1 and data[0].series[0][3] == 1.2
     print("what-if: vault ticks scaled with stored calibrations, skipped without")
 

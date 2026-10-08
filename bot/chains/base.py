@@ -28,8 +28,9 @@ class ChainAdapter(ABC):
         """Stream leader trades as Signal objects into queue. Must reconnect forever."""
 
     @abstractmethod
-    async def pre_trade_check(self, token: str, amount_native: float) -> tuple[bool, str]:
-        """Cheap safety checks before buying (freeze authority, round-trip loss)."""
+    async def pre_trade_check(self, token: str, amount_native: float, ref_price: float | None = None) -> tuple[bool, str]:
+        """Cheap safety checks before buying (freeze authority, round-trip loss). ref_price = the leader's
+        fill price (quote units per raw token unit) for a sanity check of the adapter's own price model."""
 
     @abstractmethod
     async def buy(self, token: str, amount_native: float) -> Fill: ...

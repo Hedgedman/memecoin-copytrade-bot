@@ -235,7 +235,11 @@ class SolanaAdapter(ChainAdapter):
         self.fee_bps = {"pumpfun_curve": int(cfg.get("pumpfun_fee_bps", 125)),
                         "pumpswap_amm": int(cfg.get("pumpswap_fee_bps", 30))}
         self.paper_delay = float(cfg.get("paper_land_delay_s", 1.5))   # decision -> "landed" in paper mode
-        self.tick_tail = float(cfg.get("tick_tail_s", 900))            # keep recording after close/skip
+        self.tick_tail = float(cfg.get("tick_tail_s", 900))            # keep recording after a SKIPPED signal
+        self.tick_after_close = float(cfg.get("ticks_after_close_h", 24)) * 3600   # ... and after OUR close
+        self.pool_stale_s = float(cfg.get("pool_stale_s", 180))        # no pool update for this long -> re-read over HTTP
+        lo, hi = cfg.get("fill_sanity_band", [0.5, 3.0])               # pool model price / leader's fill price
+        self.ref_band = (float(lo), float(hi))
         self.max_watched = int(cfg.get("max_watched_pools", 60))
         self.record_skipped = bool(cfg.get("record_skipped", True))
         # live only: pool price x correction factor measured against Jupiter (see _update_corr)
@@ -263,6 +267,12 @@ class SolanaAdapter(ChainAdapter):
         self._acct_token: dict[str, str] = {}
         self._hints: OrderedDict[str, tuple[str, str, str]] = OrderedDict()   # mint -> pumpswap vaults
         self._graduated: set[str] = set()
+        self._foreign_quote: set[str] = set()        # pump.fun curves quoted in a non-SOL token -> Jupiter only
+        self._model_rejected: set[str] = set()       # pool model failed the fill sanity check -> Jupiter only
+        self._ref_price: dict[str, float] = {}       # token -> leader's fill price (lamports per raw unit)
+        self._quote_source: dict[str, str] = {}      # token -> where the last exit quote came from
+        self._stale_at: dict[str, float] = {}        # token -> last stale-state HTTP re-read
+        self.min_buy_exempt: set[str] = set()        # leaders whose small buys are NOT filtered (profiles: min_usd)
         self._pinned: set[str] = set()
         self._expires: dict[str, float] = {}
         self._price_cb = None
@@ -376,7 +386,7 @@ class SolanaAdapter(ChainAdapter):
 
     async def release(self, token: str) -> None:
         self._pinned.discard(token)
-        self._expires[token] = time.time() + self.tick_tail
+        self._expires[token] = time.time() + self.tick_after_close
 
     async def observe(self, token: str) -> None:
         if not self.record_skipped or token in self._pools or token in self._graduated:
@@ -410,7 +420,9 @@ class SolanaAdapter(ChainAdapter):
             if v and v.get("owner") == PUMP_PROGRAM and isinstance(v.get("data"), list):
                 try:
                     st = decode_curve(base64.b64decode(v["data"][0]), slot, now)
-                    if st.complete:
+                    if st.quote_mint:
+                        self._foreign(token, st.quote_mint)
+                    elif st.complete:
                         self._graduated.add(token)
                     else:
                         pool = _Pool("pumpfun_curve", [cpda], state=st)
@@ -434,8 +446,17 @@ class SolanaAdapter(ChainAdapter):
                                  state=PoolState("pumpswap_amm", ta, sa, slot=slot, recv_ts=now))
         return mint_info, pool
 
-    async def _register(self, token: str, pool: _Pool) -> None:
+    def _foreign(self, token: str, quote: str) -> None:
+        """A pump.fun curve whose reserves are in `quote`, not SOL: the curve math would price it in the
+        wrong unit (position 299: ~32x off), so this token is priced, checked and filled via Jupiter."""
+        if token not in self._foreign_quote:
+            self._foreign_quote.add(token)
+            log.warning("%s: pump.fun curve is quoted in %s, not SOL -> no curve pricing, Jupiter only", token, quote)
         if token in self._pools:
+            self._drop(token)
+
+    async def _register(self, token: str, pool: _Pool) -> None:
+        if token in self._pools or token in self._model_rejected or token in self._foreign_quote:
             return
         self._pools[token] = pool
         for a in pool.accounts:
@@ -494,6 +515,9 @@ class SolanaAdapter(ChainAdapter):
                                                    slot=max(tv[1], sv[1]), recv_ts=time.time()))
 
     def _set_state(self, token: str, pool: _Pool, st: PoolState) -> None:
+        if st.venue == "pumpfun_curve" and st.quote_mint:
+            self._foreign(token, st.quote_mint)
+            return
         if st.venue == "pumpfun_curve" and st.complete:
             log.info("%s graduated off the bonding curve -> Jupiter pricing from now on", token)
             self._graduated.add(token)
@@ -780,7 +804,7 @@ class SolanaAdapter(ChainAdapter):
             except Exception as e:
                 log.warning("SOL price unavailable, skipping USDC trade %s: %s", sig, e)
                 return
-        if side == "buy" and sol < self.min_leader_buy:
+        if side == "buy" and sol < self.min_leader_buy and leader not in self.min_buy_exempt:
             log.info("ignore small leader buy %.3f SOL %s", sol, mint)
             self._event(leader, sig, "small_buy", mint, sol, f"< min_leader_buy_sol {self.min_leader_buy}")
             return
@@ -873,7 +897,11 @@ class SolanaAdapter(ChainAdapter):
         return await self._sol_usd()
 
     # ---------- ChainAdapter API ----------
-    async def pre_trade_check(self, token: str, amount_native: float) -> tuple[bool, str]:
+    async def pre_trade_check(self, token: str, amount_native: float, ref_price: float | None = None) -> tuple[bool, str]:
+        """ref_price = the leader's fill price from his swap (lamports per raw unit): the pool model must agree
+        with it within fill_sanity_band, else the model is rejected and Jupiter is used (check AND fill)."""
+        if ref_price:
+            self._ref_price[token] = ref_price
         try:
             info, pool = await self._resolve(token)
             if self.reject_freeze and info.get("freezeAuthority"):
@@ -896,12 +924,33 @@ class SolanaAdapter(ChainAdapter):
                     pass
                 pool = self._pools.get(token)
             if pool and pool.state and (pool.venue not in self.vault_venues or token in self._corr):
-                return await self._check_on_pool(pool, lamports, supply, token)
+                if self._model_ok(token, pool):
+                    return await self._check_on_pool(pool, lamports, supply, token)
             return await self._check_on_jupiter(token, lamports, supply)
         except RateLimited:
             return False, "check error: jupiter rate limit"
         except Exception as e:
             return False, f"check error: {e}"
+
+    def _model_ok(self, token: str, pool: _Pool) -> bool:
+        """Fill sanity guard: the pool model's price vs the leader's fill price (from his swap). A ratio outside
+        fill_sanity_band (default 0.5-3) means the model prices the wrong thing (wrong quote unit, wrong pool,
+        stale state): reject it for this token, drop the pool, warn -> pre-trade check and fill go via Jupiter."""
+        ref = self._ref_price.get(token)
+        if not ref or not pool.state:
+            return True
+        model = pool.state.lamports_per_raw()
+        if pool.venue in self.vault_venues:
+            model *= self._corr.get(token, 1.0)
+        ratio = model / ref
+        if self.ref_band[0] <= ratio <= self.ref_band[1]:
+            return True
+        log.warning("%s: %s model price is %.2fx the leader's fill price -> pool model rejected, Jupiter only",
+                    token, pool.venue, ratio)
+        self._event("", "", "model_rejected", token, None, f"{pool.venue} model/leader price ratio {ratio:.3f}")
+        self._model_rejected.add(token)
+        self._drop(token)
+        return False
 
     def _mc_reject(self, mc_usd: float) -> str | None:
         """Reason to skip on market cap, or None. Bot-scale caps can be up to ~20% below the
@@ -960,7 +1009,7 @@ class SolanaAdapter(ChainAdapter):
                 # simulate the time a real tx needs to land: other buyers get in first
                 await asyncio.sleep(self.paper_delay)
                 pool = self._pools.get(token)
-                if pool and pool.state and pool.venue not in self.vault_venues:
+                if pool and pool.state and pool.venue not in self.vault_venues and self._model_ok(token, pool):
                     st = pool.state
                     return Fill(True, None, st.buy_out(lamports, self.fee_bps[pool.venue]),
                                 amount_native + self.paper_fee, slot=st.slot,
@@ -992,22 +1041,41 @@ class SolanaAdapter(ChainAdapter):
         except Exception as e:
             log.debug("price correction %s: %s", token, e)
 
+    def quote_source(self, token: str) -> str | None:
+        """Where the last exit quote of `token` came from: the pool venue ('pumpfun_curve', 'pumpswap_amm',
+        'meteora_damm_v2', with '*corr' when a live correction factor is applied) or 'jupiter'."""
+        return self._quote_source.get(token)
+
     async def quote_exit(self, pos: Position) -> float | None:
         pool = self._pools.get(pos.token)
         if not self.paper and pool and pos.token not in self._live_tokens:
             self._live_tokens[pos.token] = pos.token_amount     # e.g. resumed after a restart
             asyncio.ensure_future(self._safe_corr(pos.token))
         if pool and pool.state:
-            if not self.hub.connected and time.time() - pool.state.recv_ts > 2:
+            now = time.time()
+            stale = now - pool.state.recv_ts > self.pool_stale_s
+            if (not self.hub.connected and now - pool.state.recv_ts > 2) or (
+                    stale and now - self._stale_at.get(pos.token, 0) > self.pool_stale_s):
+                # Stale-state guard (position 192: one tick, then 10 h of marks on a curve that had graduated):
+                # a pool we hold that stays silent is re-read over HTTP; a state we cannot verify is not a mark.
+                self._stale_at[pos.token] = now
                 try:
                     await self._refresh([pos.token])
+                    if stale:
+                        log.info("%s: no pool update for %.0fs - re-read over HTTP (%s)", pos.token,
+                                 now - pool.state.recv_ts, "still watched" if pos.token in self._pools else "dropped")
                 except Exception as e:
-                    log.debug("pool refresh failed %s: %s", pos.token, e)
-            v = self._pool_value(pos)
+                    log.warning("%s: stale pool state (%.0fs) could not be re-read: %s - no mark", pos.token,
+                                now - pool.state.recv_ts, e)
+                    return None
+                pool = self._pools.get(pos.token)
+            v = self._pool_value(pos) if pool and pool.state else None
             if v is not None:
+                self._quote_source[pos.token] = pool.venue + ("*corr" if not self.paper else "")
                 return v
         try:
             q = await self._quote(pos.token, WSOL, pos.token_amount)
+            self._quote_source[pos.token] = "jupiter"
             return int(q["outAmount"]) / LAMPORTS
         except RateLimited:
             raise

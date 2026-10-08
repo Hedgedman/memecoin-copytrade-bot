@@ -107,7 +107,9 @@ class Bot:
                     return
                 size = usd / sol_usd
                 timing.update(prof.stamp(), his_usd=round(s.quote_amount * sol_usd, 2), our_usd=round(usd, 2))
-            ok, why = await adapter.pre_trade_check(s.token, size)
+            # the leader's fill price (lamports per raw unit): sanity reference for the adapter's pool model
+            ref = s.quote_amount * 1e9 / s.token_amount if s.chain == "solana" and s.token_amount else None
+            ok, why = await adapter.pre_trade_check(s.token, size, ref_price=ref)
             timing["checked_at"] = time.time()
             if not ok:
                 self.store.log_signal(s, "skip", why)

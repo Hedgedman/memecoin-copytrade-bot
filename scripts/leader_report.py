@@ -19,6 +19,8 @@ trade. Columns:
             SOL/token from his swap vs our cost/tokens (incl. the paper fee); xchain: xchain_fills.gap_pct
   venues    Solana fill model: pool (pumpfun_curve / pumpswap_amm maths) vs jup (Jupiter-quoted)
   flag      SMALL below --small (default 10) closed trades: the row says nothing yet
+DATA RULE: positions flagged by scripts/flags.py (unconfirmed single-step mark change > 50%) are excluded by
+default and listed; --include-flagged keeps them.
 """
 import argparse
 import json
@@ -28,6 +30,8 @@ import statistics
 import time
 from collections import defaultdict
 from datetime import datetime
+
+from scripts.flags import flagged_note, flagged_positions
 
 SMALL = 10
 
@@ -83,12 +87,13 @@ def solana_gap(db, p):
     return 100 * (ours / his - 1) if his > 0 else None
 
 
-def collect(db, from_id=0, hours=None, peak_h=6.0, sol_usd=None):
-    """-> {(leader, scope): stats}. scope in ('solana', 'xchain', 'all')."""
+def collect(db, from_id=0, hours=None, peak_h=6.0, sol_usd=None, flagged=None):
+    """-> {(leader, scope): stats}. scope in ('solana', 'xchain', 'all'). flagged = {id: reason} to leave out."""
     since = time.time() - hours * 3600 if hours else 0.0
     cols = [r[1] for r in db.execute("PRAGMA table_info(positions)")]
     rows = [dict(zip(cols, r)) for r in db.execute(
-        "SELECT * FROM positions WHERE paper=1 AND id>=? AND opened_at>=? ORDER BY id", (from_id, since))]
+        "SELECT * FROM positions WHERE paper=1 AND id>=? AND opened_at>=? ORDER BY id", (from_id, since))
+        if r[0] not in (flagged or {})]
     per = defaultdict(lambda: {"pnl": [], "pct": [], "peak": [], "gap": [], "open": 0, "venues": defaultdict(int),
                                "peak_marks": 0})
     for p in rows:
@@ -164,9 +169,14 @@ def main():
     ap.add_argument("--small", type=int, default=SMALL, help="flag rows with fewer closed trades than this")
     ap.add_argument("--peak-h", type=float, default=6.0, help="Solana: ticks window after the fill for the peak")
     ap.add_argument("--sol-usd", type=float, default=None, help="SOL price to combine Solana + xchain PnL in USD")
+    ap.add_argument("--include-flagged", action="store_true", help="keep positions the DATA RULE flags")
     a = ap.parse_args()
     db = open_db(a.db)
-    stats = collect(db, a.from_id, a.hours, a.peak_h, a.sol_usd)
+    flagged = flagged_positions(db)
+    print(flagged_note(flagged, a.include_flagged))
+    for pid in sorted(flagged):
+        print(f"  #{pid:<5} {flagged[pid]}")
+    stats = collect(db, a.from_id, a.hours, a.peak_h, a.sol_usd, None if a.include_flagged else flagged)
     when = f"last {a.hours:g} h" if a.hours else "all history"
     if a.from_id:
         when += f", positions >= #{a.from_id}"

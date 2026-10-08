@@ -9,3 +9,4 @@ backup/
 bot/chains/solana_backup*.py
 data/
 backtests/
+flagged_positions.json

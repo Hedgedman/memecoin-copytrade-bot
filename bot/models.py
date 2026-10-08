@@ -56,3 +56,5 @@ class Position:
     last_mark_at: float = 0.0                    # not saved; throttles writes to `marks`
     peak_value: float | None = None              # highest exit value seen (trailing stop); rebuilt from marks
     below_since: float | None = None             # not saved; when a stop/trailing condition started (confirmation)
+    last_value: float | None = None              # last total value seen (restored from the latest mark)
+    pending_switch: tuple | None = None          # not saved; (new source, since) while a source switch is unconfirmed

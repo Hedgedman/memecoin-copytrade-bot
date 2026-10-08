@@ -36,6 +36,11 @@ class PositionManager:
         self.stop_basis = cfg.get("stop_basis", "cost")   # "cost" or "entry_price"
         self.max_quote_failures = int(cfg.get("max_quote_failures", 20))
         self.mark_interval = float(cfg.get("mark_interval_s", 1.0))   # min seconds between saved marks
+        # source switch (pool -> Jupiter after graduation, pool dropped, correction factor): a first quote from
+        # a new source that differs > switch_max_ratio x from the last mark is NOT acted on; the new source
+        # must deliver a second quote >= switch_confirm_s later first. ref_value is never rebased.
+        self.switch_ratio = float(cfg.get("switch_max_ratio", 2.0))
+        self.switch_confirm = float(cfg.get("switch_confirm_s", 2.0))
         self.positions: list[Position] = []
         self._checking: set[int] = set()
 
@@ -124,7 +129,8 @@ class PositionManager:
         p.exit_reason, p.exit_sig = reason, fill.signature
         p.timing.update(exit_filled_at=p.closed_at, exit_fill_slot=fill.slot, exit_model=fill.model)
         self.store.close_position(p)
-        if hasattr(a, "release"):
+        if hasattr(a, "release") and not any(q.chain == p.chain and q.token == p.token and q.status != "closed"
+                                             for q in self.positions):     # another position may still need the pool
             await a.release(p.token)
         pnl = p.exit_value - p.cost
         lag = p.closed_at - p.timing["exit_trigger_at"]
@@ -168,6 +174,8 @@ class PositionManager:
         if now - p.last_mark_at >= self.mark_interval:
             self.store.mark(p, total)
             p.last_mark_at = now
+        if not self._switch_confirmed(p, total, now):
+            return                       # unconfirmed first quote of a new source: mark saved, no exit decision
         if p.ref_value is None:
             p.ref_value = value / held   # first exit quote after buying = our "entry price" (whole position)
             self.store.set_ref(p)        # saved, so a restart keeps the same stop level
@@ -183,6 +191,44 @@ class PositionManager:
             await self.close(p, "stop_loss", value)
         elif max_hold > 0 and age > max_hold:
             await self.close(p, "max_hold", value)
+
+    def _switch_confirmed(self, p: Position, total: float, now: float) -> bool:
+        """Source-switch guard. Tracks where the quote came from (adapter.quote_source, if it has one). When the
+        source changes and the first new quote is > switch_max_ratio away from the last value, the position is
+        flagged (timing["source_switch"], timing["flagged"]) and exits wait for a second quote from the same
+        source >= switch_confirm_s later. Returns False while waiting. Updates p.last_value."""
+        get = getattr(self.adapters.get(p.chain), "quote_source", None)
+        src = get(p.token) if get else None
+        last_src, last_val = p.timing.get("quote_source"), p.last_value
+        p.last_value = total
+        if src is None:
+            return True
+        if src != last_src:
+            p.timing["quote_source"] = src
+            if last_src is not None and last_val:
+                ratio = total / last_val
+                if ratio > self.switch_ratio or ratio < 1 / self.switch_ratio:
+                    p.pending_switch = (src, now)
+                    p.timing["source_switch"] = round(ratio, 4)
+                    p.timing["flagged"] = f"source switch {last_src}->{src} x{ratio:.3f} at {now:.0f}"
+                    log.warning("%s: price source %s -> %s, first quote %.3fx the last mark (%.4f -> %.4f): "
+                                "flagged, waiting %.0fs for a confirming quote", p.token, last_src, src, ratio,
+                                last_val, total, self.switch_confirm)
+                else:
+                    p.pending_switch = None
+                    log.info("%s: price source %s -> %s (%.3fx the last mark)", p.token, last_src, src, ratio)
+            self.store.update_position(p)
+        if p.pending_switch:
+            psrc, since = p.pending_switch
+            if src != psrc:
+                p.pending_switch = (src, now)
+                return False
+            if now - since < self.switch_confirm:
+                return False
+            p.pending_switch = None
+            log.info("%s: source %s confirmed after %.1fs, acting on %.4f (last pre-switch mark %.4f)", p.token, src,
+                     now - since, total, last_val)
+        return True
 
     async def run(self):
         while True:

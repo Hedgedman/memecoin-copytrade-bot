@@ -100,7 +100,7 @@ class FakeSol:
     def __init__(self):
         self.bought = []
     async def sol_usd(self): return 200.0
-    async def pre_trade_check(self, token, size): return True, "ok"
+    async def pre_trade_check(self, token, size, ref_price=None): return True, "ok"
     async def buy(self, token, size):
         self.bought.append(size)
         return Fill(True, "sig", 1000, size + 0.01, model="pumpswap_amm+0.8s")

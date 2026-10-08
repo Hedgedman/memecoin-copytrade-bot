@@ -44,16 +44,16 @@ def main():
     path = os.path.join(tempfile.mkdtemp(), "t.db")
     seed(path)
     ids = lambda data: sorted(p.pid for p in data)
-    data, skipped, mc_out, excluded = load(path, 230, FEES, 0.01, 3600, exclude_profiles=True)
+    data, skipped, mc_out, excluded, _ = load(path, 230, FEES, 0.01, 3600, exclude_profiles=True)
     assert ids(data) == [230, 232] and skipped == 0 and mc_out == 0
     assert excluded == [(231, L2, "trail_Leader-B"), (233, L1, "mirror_Leader-A")], excluded
-    data, _, _, excluded = load(path, 230, FEES, 0.01, 3600, exclude_profiles=False)
+    data, _, _, excluded, _ = load(path, 230, FEES, 0.01, 3600, exclude_profiles=False)
     assert ids(data) == [230, 231, 232, 233] and excluded == []
-    data, _, _, excluded = load(path, 230, FEES, 0.01, 3600, profile="trail_Leader-B", exclude_profiles=True)
+    data, _, _, excluded, _ = load(path, 230, FEES, 0.01, 3600, profile="trail_Leader-B", exclude_profiles=True)
     assert ids(data) == [231] and len(excluded) == 3
-    data, _, _, _ = load(path, 230, FEES, 0.01, 3600, profile="default")
+    data, _, _, _, _ = load(path, 230, FEES, 0.01, 3600, profile="default")
     assert ids(data) == [230, 232]
-    data, _, _, _ = load(path, 232, FEES, 0.01, 3600, exclude_profiles=True)      # --from-id still applies
+    data, _, _, _, _ = load(path, 232, FEES, 0.01, 3600, exclude_profiles=True)      # --from-id still applies
     assert ids(data) == [232]
 
     # venue split: the same filter, the same list

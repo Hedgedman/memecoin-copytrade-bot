@@ -26,6 +26,12 @@ class Store:
             ts REAL, slot INTEGER, token TEXT, venue TEXT,
             tok_res INTEGER, sol_res INTEGER, real_tok INTEGER, real_sol INTEGER);
         CREATE INDEX IF NOT EXISTS ticks_token_ts ON ticks(token, ts);
+        CREATE TABLE IF NOT EXISTS ticks_1m(
+            ts REAL, token TEXT, venue TEXT, n INTEGER,
+            tok_open INTEGER, sol_open INTEGER, tok_high INTEGER, sol_high INTEGER,
+            tok_low INTEGER, sol_low INTEGER, tok_close INTEGER, sol_close INTEGER,
+            real_tok_close INTEGER, real_sol_close INTEGER);
+        CREATE INDEX IF NOT EXISTS ticks_1m_token_ts ON ticks_1m(token, ts);
         CREATE TABLE IF NOT EXISTS pool_factors(ts REAL, token TEXT, factor REAL);
         CREATE TABLE IF NOT EXISTS leader_events(ts REAL, leader TEXT, signature TEXT, kind TEXT,
             token TEXT, sol REAL, detail TEXT);
@@ -205,6 +211,9 @@ class Store:
             p.timing = json.loads(r[9]) if r[9] else {}
             peak = self.db.execute("SELECT MAX(value) FROM marks WHERE position_id=?", (r[0],)).fetchone()[0]
             p.peak_value = peak        # trailing stop keeps its peak across restarts
+            last = self.db.execute("SELECT value FROM marks WHERE position_id=? ORDER BY ts DESC LIMIT 1",
+                                   (r[0],)).fetchone()
+            p.last_value = last[0] if last else None   # source-switch guard compares the first new quote with it
             out.append(p)
         return out
 

@@ -236,7 +236,7 @@ class EvmAdapter(ChainAdapter):
             await asyncio.sleep(0.25)
         return None
 
-    async def pre_trade_check(self, token: str, amount_native: float) -> tuple[bool, str]:
+    async def pre_trade_check(self, token: str, amount_native: float, ref_price: float | None = None) -> tuple[bool, str]:
         try:
             if (await self._rpc("eth_getCode", [token, "latest"])) in ("0x", "0x0"):
                 return False, "token has no code"

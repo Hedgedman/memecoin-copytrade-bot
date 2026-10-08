@@ -26,7 +26,7 @@ async def test_bot_skips():
         "risk": {"max_open_positions": 4, "reentry_cooldown_s": 0}, "exits": {}}
     bot = Bot(cfg)
     checked = []
-    async def fake_check(token, amount):
+    async def fake_check(token, amount, ref_price=None):
         checked.append(token); return False, "stop here"
     bot.adapters["solana"].pre_trade_check = fake_check
     for t, expect_checked in ((add, False), (first, True), (dust, True)):
