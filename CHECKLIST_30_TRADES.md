@@ -70,3 +70,53 @@ HYPOTHESIS 5 (paper, from ID 230): the venue split of the same positions (pool /
   Count only positions without timing.profile. Profile leaders (trail_Leader-B since Oct 7 21:46, mirror_Leader-A since
   restart ____) are evaluated separately.
   Check: python whatif_ticksv2.py --from-id 230   (venue split at the end; --no-exclude-profiles to include them)
+
+---- Oct 8 2026 (night build, see BUILD_NOTES_2026-10-08.md; restart pending) ----
+DATA RULE: positions with a single-step mark change > 50% are excluded from ALL tests unless the change is
+  confirmed by an independent source (a Jupiter-vs-pool calibration within 10 min, or an add-on fill).
+  Applies to winners and losers alike. Currently: 299, 192, 269, 40 (python -m scripts.flag_positions).
+  whatif_ticksv2.py, scripts/leader_report.py, scripts/leader_selection.py and scripts/missed_runners.py drop
+  them by default and list them; --include-flagged shows them. The bot flags live source switches itself
+  (timing.flagged) - those count too.
+HYPOTHESIS 6 (paper, EVM normal leaders): Robinhood/BSC positions of NON-profile leaders use the global exits:
+  TP +30% on cost, stop -20% from the first Relay quote after the fill, max hold 48 h, his sells IGNORED
+  (timing.exits.rule = "H6"). Starts at restart ____________ (date/time), commit ____________.
+  Count: EVM positions opened after that WITHOUT timing.profile (= with timing.exits.rule "H6"):
+    sqlite3 copybot.db "SELECT COUNT(*), SUM(status='closed'), ROUND(SUM(CASE WHEN status='closed' THEN exit_value-cost END),0)
+      FROM positions WHERE chain!='solana' AND timing LIKE '%\"rule\": \"H6\"%';"
+    python whatif_xchain.py --profile H6 --list ; python -m scripts.xchain_report --all (rows labelled H6)
+  Interim at 25 closed: PnL w/o best < 0 -> stop. Pass at 50 closed: PnL > 0 w/o best.
+  Positions opened before the restart (130, 184, 229, 257 open tonight) keep the legacy rules (his sells
+  mirrored, safety stop -60%) and are NOT part of H6.
+mirror_ladder_Leader-B (paper, runner test) for Leader-B: his buys AND adds
+  copied at 0.219x (cap $1,000/token incl. adds, min $25), his sells mirrored pro rata, PLUS own ladder: sell
+  25% of the current holding at 10x / 25x / 50x / 100x our average entry (each once; adds raise the average),
+  safety stop -60% on the cost of what we still hold, no trailing, no TP. Own limits: 10 open tokens, $500/day.
+  Starts at restart ____________. Kill if after 100 positions the average loss on positions WITHOUT a 10x is
+  worse than -40%, or after 200 positions no token reached 10x. Review at 6 months. NOT judged on "w/o best 3".
+  Check: python whatif_ticksv2.py --profile mirror_ladder_Leader-B ; python whatif_xchain.py --profile mirror_ladder_Leader-B --list
+         sqlite3 copybot.db "SELECT id, chain, status, ROUND(cost,2), ROUND(exit_value,2), exit_reason, json_extract(timing,'$.ladder_fired')
+           FROM positions WHERE timing LIKE '%mirror_ladder_Leader-B%' ORDER BY id;"
+mirror_Leader-A (paper) for Leader-A: enabled at restart ____________ with
+  mode mirror, his buys AND adds copied at 0.400x (cap $1,000/token incl. adds, min $25), his sells mirrored
+  pro rata, stop -60% on the rest, marks every 30 s, 10 open tokens, $500/day. (Fill the "restart ____" blanks
+  of the Oct 7 mirror_Leader-A entry above with the same time.) Pre-registered test unchanged: ~30 new tokens,
+  pass = PnL > 0 without the best 3.
+LEADER SELECTION rules (scripts/leader_selection.py, Solana + xchain combined, flagged positions excluded,
+  profile positions not counted):
+  CUT     = median entry gap > +20% over >= 5 entries, OR (>= 15 closed AND PnL w/o best < 0 AND avg < -5%),
+            OR no buy signal in 14 days
+  PROMOTE = >= 30 closed AND PnL w/o best 2 > 0 AND median gap < +5%
+  WATCH   = everything else. The script prints which rule fired.
+  Leader status (config chains.solana.leader_status): active = paper trades; watch = signals, entry gaps and
+  post-signal price paths recorded, NO positions on any chain, never blocks a token.
+  Leader-C = watch since restart ____________ (gap +30% over 7 entries).
+  First run Oct 8 (whole history, SOL $200): CUT Leader-Q (gap +48%/27), Leader-D (20 closed, w/o best -$672,
+  avg -6.5%), Leader-O (gap +39%), Leader-P (gap +20%); 0 PROMOTE. Not acted on (judge at 8-10+ trades).
+trail_Leader-B: closed Oct 8 2026, replaced by mirror_ladder_Leader-B (0 positions were opened under trail_Leader-B).
+Profiles since Oct 8: profile positions are keyed by (leader, token), separate from normal positions, outside
+  max_open_positions / daily_loss_limit / xchain 50-open / 5-per-leader; the min_leader_buy_sol filter does not
+  apply to profile leaders (their min_usd does). H4/H5/H6 counts exclude them (timing.profile).
+Tick retention since Oct 8: ticks_after_close_h 24 (was 6 h); ticks older than 7 days -> 1-minute bars with
+  python -m scripts.compact_ticks (bot STOPPED). whatif_ticksv2 replays old positions on the bars (minute
+  precision) and requires the tick series to start within 30 s of our fill (258 and 268 are "not replayable").
