@@ -72,10 +72,11 @@ class Bot:
         r = cfg["risk"]
         log.info("risk: max_open_positions %s, reentry_cooldown_s %s, kill switch file %s; daily_loss_limit %s "
                  "(realized PnL of closed normal positions since 00:00 UTC; blocks new buys only, open positions "
-                 "keep their exits); buy_amount %s", r.get("max_open_positions", 3), r.get("reentry_cooldown_s", 1800),
-                 r.get("kill_switch_file", "STOP"),
+                 "keep their exits); buy_amount %s; one_entry_per_token %s", r.get("max_open_positions", 3),
+                 r.get("reentry_cooldown_s", 1800), r.get("kill_switch_file", "STOP"),
                  ", ".join(f"{n} {c.get('daily_loss_limit', 0)}" for n, c in cfg["chains"].items() if c.get("enabled")),
-                 ", ".join(f"{n} {c.get('buy_amount')}" for n, c in cfg["chains"].items() if c.get("enabled")))
+                 ", ".join(f"{n} {c.get('buy_amount')}" for n, c in cfg["chains"].items() if c.get("enabled")),
+                 ", ".join(f"{n} {bool(c.get('one_entry_per_token'))}" for n, c in cfg["chains"].items() if c.get("enabled")))
         self.in_flight: set[tuple[str, str, str]] = set()        # (chain, token, profile name or "")
         if "solana" in self.adapters:                             # profile leaders: min_usd instead of min_leader_buy_sol
             self.adapters["solana"].min_buy_exempt = set(self.profiles)
