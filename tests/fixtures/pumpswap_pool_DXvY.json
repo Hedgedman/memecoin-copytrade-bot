@@ -1,0 +1,65 @@
+{
+ "note": "PumpSwap pool of DXvY5Ep1j9Eqwf6qHkemgWgBsEfhEKDsSizDjT4ipump (live pos 55/56, Oct 8 2026). pool_account: getAccountInfo on Oct 9 2026. events: BuyEvent/SellEvent of our 4 live txs (the reserves the program priced on).",
+ "pool": "DeevgrVbhZwzqPGzuvzYXCgKn4MnvauZwX4oPCAe6PpJ",
+ "slot": 454689338,
+ "owner": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+ "data_b64": "8ZptBBGxbbz/AAB9EVw/+RSjldCEI18inFDkMMZUzdv5SJFN3Q2UZmClQ7o4M1BngKxamdmw1puUKZTU7ecCM/oZn+ZzWwYkjFi/BpuIV/6rgYT7aH9jRhjANdrEOdwa6ztVmKDwAAAAAAEbGfWNeN7bgkso9NPXKfPVz46DinXomJnE/XLfmYTiqiuQaBHrlkghSoTSKnb5jg5bVPuQmwG19+v50WDFmuW3GtAnfkSPRKTKwT6a8Eszi53fZ17Uz7fsPcYfAtQ2RRMsxmtZ0AMAAIjLcbW1wOTdiKGD7K6yqex5dbRW+gVe2Od81RZgS0ZOAADsLRwYBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9hQCAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+ "base_vault": "3w4FCj87hNaqgS6dzP3tpeBxuDJmAwyrUN4yzhowCEM4",
+ "quote_vault": "2ofhBhBmcJgRsyZboNdEWiZu8CN4jryfhDCbVEE3Pyri",
+ "events": {
+  "buy55": {
+   "slot": 454677177,
+   "ix_name": "buy_exact_quote_in",
+   "base_amount_out": 1240347219248,
+   "pool_base_token_reserves": 150501630717089,
+   "pool_quote_token_reserves": 105898836823,
+   "virtual_quote_reserves": 13012532667,
+   "quote_amount_in": 1000000000,
+   "user_quote_amount_in": 988142291,
+   "lp_fee_basis_points": 20,
+   "protocol_fee_basis_points": 5,
+   "coin_creator_fee_basis_points": 95,
+   "event": "BuyEvent"
+  },
+  "sell55": {
+   "slot": 454677461,
+   "base_amount_in": 1240347219248,
+   "pool_base_token_reserves": 168020845140521,
+   "pool_quote_token_reserves": 94794101041,
+   "virtual_quote_reserves": 12148304480,
+   "quote_amount_out": 783674706,
+   "user_quote_amount_out": 774270608,
+   "lp_fee_basis_points": 20,
+   "protocol_fee_basis_points": 5,
+   "coin_creator_fee_basis_points": 95,
+   "event": "SellEvent"
+  },
+  "buy56": {
+   "slot": 454677472,
+   "ix_name": "buy_exact_quote_in",
+   "base_amount_out": 1573480793211,
+   "pool_base_token_reserves": 169964910948982,
+   "pool_quote_token_reserves": 93642271926,
+   "virtual_quote_reserves": 12107155794,
+   "quote_amount_in": 1000000000,
+   "user_quote_amount_in": 988142291,
+   "lp_fee_basis_points": 20,
+   "protocol_fee_basis_points": 5,
+   "coin_creator_fee_basis_points": 95,
+   "event": "BuyEvent"
+  },
+  "sell56": {
+   "slot": 454677485,
+   "base_amount_in": 1573480793211,
+   "pool_base_token_reserves": 192220948010854,
+   "pool_quote_token_reserves": 81656555179,
+   "virtual_quote_reserves": 11905031164,
+   "quote_amount_out": 759657333,
+   "user_quote_amount_out": 750541444,
+   "lp_fee_basis_points": 20,
+   "protocol_fee_basis_points": 5,
+   "coin_creator_fee_basis_points": 95,
+   "event": "SellEvent"
+  }
+ }
+}

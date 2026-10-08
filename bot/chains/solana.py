@@ -33,7 +33,8 @@ from solders.transaction import VersionedTransaction
 from ..models import Fill, Position, Signal
 from ..secrets import get_secret
 from ..pricing.pools import (AccountHub, PoolState, PUMP_PROGRAM, PUMPSWAP_PROGRAM,
-                             curve_pda, decode_curve, decode_token_amount, find_pool_vaults)
+                             curve_pda, decode_curve, decode_pumpswap_virtual, decode_token_amount,
+                             find_pool_vaults, pumpswap_state)
 from .base import ChainAdapter, RateLimited
 
 log = logging.getLogger("solana")
@@ -218,6 +219,8 @@ class _Pool:
     token_vault: str | None = None            # pumpswap only
     sol_vault: str | None = None
     amounts: dict = field(default_factory=dict)   # vault -> (amount, slot)
+    pool_acct: str | None = None              # pumpswap only: the Pool account (virtual_quote_reserves)
+    virtual: int = 0                          # pumpswap only: last virtual_quote_reserves (signed lamports)
     state: PoolState | None = None
     pending: asyncio.TimerHandle | None = None
 
@@ -483,10 +486,14 @@ class SolanaAdapter(ChainAdapter):
                                  state=PoolState(venue, ta, sa, slot=slot, recv_ts=now))
             elif owner_acc and owner_acc.get("owner") == PUMPSWAP_PROGRAM and tv_acc and sv_acc:
                 ta, sa = _amount_of(tv_acc), _amount_of(sv_acc)
+                pdata = owner_acc.get("data")
+                virtual = (decode_pumpswap_virtual(base64.b64decode(pdata[0]))
+                           if isinstance(pdata, list) and pdata else 0)
                 if ta and sa:
-                    pool = _Pool("pumpswap_amm", [hint[1], hint[2]], token_vault=hint[1],
+                    pool = _Pool("pumpswap_amm", [hint[0], hint[1], hint[2]], token_vault=hint[1],
                                  sol_vault=hint[2], amounts={hint[1]: (ta, slot), hint[2]: (sa, slot)},
-                                 state=PoolState("pumpswap_amm", ta, sa, slot=slot, recv_ts=now))
+                                 pool_acct=hint[0], virtual=virtual,
+                                 state=pumpswap_state(ta, sa, virtual, slot=slot, recv_ts=now))
         return mint_info, pool
 
     def _foreign(self, token: str, quote: str) -> None:
@@ -530,6 +537,18 @@ class SolanaAdapter(ChainAdapter):
             if pool.venue == "pumpfun_curve":
                 self._set_state(token, pool, decode_curve(data, slot, recv_ts))
                 return
+            if key == pool.pool_acct:
+                virtual = decode_pumpswap_virtual(data)
+                if virtual == pool.virtual:
+                    return
+                # v2 trades keep their fees in the quote vault and lower virtual_quote_reserves by the same
+                # amount; re-price now if the vaults are a complete pair (a vault message that is still on its way
+                # re-prices again; the gap in between is at most one trade's fee).
+                pool.virtual = virtual
+                tv, sv = pool.amounts.get(pool.token_vault), pool.amounts.get(pool.sol_vault)
+                if tv and sv and tv[1] == sv[1] and not pool.pending:
+                    self._set_state(token, pool, self._pair_state(pool, tv, sv, max(tv[1], slot), recv_ts))
+                return
             pool.amounts[key] = (decode_token_amount(data), slot)
         except ValueError as e:
             log.debug("bad account data for %s: %s", key, e)
@@ -543,7 +562,7 @@ class SolanaAdapter(ChainAdapter):
         if tv[1] == sv[1]:
             if pool.pending:
                 pool.pending.cancel(); pool.pending = None
-            self._set_state(token, pool, PoolState(pool.venue, tv[0], sv[0], slot=tv[1], recv_ts=recv_ts))
+            self._set_state(token, pool, self._pair_state(pool, tv, sv, tv[1], recv_ts))
         elif pool.pending is None:
             pool.pending = asyncio.get_running_loop().call_later(0.05, self._flush_pair, token)
 
@@ -554,8 +573,14 @@ class SolanaAdapter(ChainAdapter):
         pool.pending = None
         tv, sv = pool.amounts.get(pool.token_vault), pool.amounts.get(pool.sol_vault)
         if tv and sv and tv[0] and sv[0]:
-            self._set_state(token, pool, PoolState(pool.venue, tv[0], sv[0],
-                                                   slot=max(tv[1], sv[1]), recv_ts=time.time()))
+            self._set_state(token, pool, self._pair_state(pool, tv, sv, max(tv[1], sv[1]), time.time()))
+
+    @staticmethod
+    def _pair_state(pool: _Pool, tv: tuple, sv: tuple, slot: int, recv_ts: float) -> PoolState:
+        """State from the two vault amounts; PumpSwap adds the pool's virtual_quote_reserves."""
+        if pool.venue == "pumpswap_amm":
+            return pumpswap_state(tv[0], sv[0], pool.virtual, slot=slot, recv_ts=recv_ts)
+        return PoolState(pool.venue, tv[0], sv[0], slot=slot, recv_ts=recv_ts)
 
     def _set_state(self, token: str, pool: _Pool, st: PoolState) -> None:
         if st.venue == "pumpfun_curve" and st.quote_mint:

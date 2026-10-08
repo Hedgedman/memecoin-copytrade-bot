@@ -2,7 +2,8 @@
 
 Supported venues
   pumpfun_curve  - Pump.fun bonding curve: one account holding (virtual) reserves
-  pumpswap_amm   - PumpSwap constant-product pool: two vault token accounts
+  pumpswap_amm   - PumpSwap constant-product pool: two vault token accounts + the pool account
+                   (virtual_quote_reserves: priced on quote vault + virtual, see decode_pumpswap_virtual)
 
 Everything is in raw units (lamports, raw token units), so token decimals never matter.
 fee_bps is a config value, not a constant: fee models change. Calibrate with calibrate.py.
@@ -42,6 +43,30 @@ _QUOTE_MINT_OFF = 83
 _WSOL_BYTES = bytes(Pubkey.from_string(WSOL))
 
 
+# PumpSwap Pool layout (pump_amm IDL, pump-public-docs, checked Oct 9 2026):
+#   8 discriminator | pool_bump u8 | index u16 | creator | base_mint | quote_mint | lp_mint | pool_base_token_account |
+#   pool_quote_token_account (6 pubkeys, 11..203) | lp_supply u64 (203) | coin_creator (211..243) | is_mayhem_mode bool (243) |
+#   is_cashback_coin bool (244) | virtual_quote_reserves i128 (245..261) | creator_fee_bps u64 | ... | protocol_fees u64 |
+#   creator_fees u64
+# Buys AND sells are priced on effective_quote_reserves = quote vault amount + virtual_quote_reserves (signed: boost
+# reserves minus fees kept in the vault by v2 trades; the sum is never negative). The base side is the raw vault.
+# Without it the model was 11-28% off on live PumpSwap tokens (pos 55 DXvY5Ep1: virtual 13.01 SOL on a 105.9 SOL vault).
+_PS_VIRTUAL = slice(245, 261)
+
+
+def decode_pumpswap_virtual(data: bytes) -> int:
+    """`virtual_quote_reserves` (signed lamports) of a PumpSwap Pool account; 0 for pools written before the field."""
+    if len(data) < _PS_VIRTUAL.stop:
+        return 0
+    return int.from_bytes(data[_PS_VIRTUAL], "little", signed=True)
+
+
+def pumpswap_state(tok_vault: int, sol_vault: int, virtual: int, slot: int = 0, recv_ts: float = 0.0) -> "PoolState":
+    """PumpSwap pool priced on the effective quote reserves; real_sol = the quote vault (a sell never pays out more)."""
+    return PoolState("pumpswap_amm", tok_vault, max(1, sol_vault + virtual), real_sol=sol_vault, slot=slot,
+                     recv_ts=recv_ts)
+
+
 def curve_pda(mint: str) -> str:
     pda, _ = Pubkey.find_program_address(
         [b"bonding-curve", bytes(Pubkey.from_string(mint))], Pubkey.from_string(PUMP_PROGRAM))
@@ -55,7 +80,9 @@ def _ceil_div(a: int, b: int) -> int:
 @dataclass(frozen=True)
 class PoolState:
     """Constant-product pool. For the Pump.fun curve, tok_res/sol_res are the VIRTUAL
-    reserves (they set the price) and real_* cap what can actually be bought/sold."""
+    reserves (they set the price) and real_* cap what can actually be bought/sold.
+    PumpSwap: sol_res = effective quote reserves (vault + virtual_quote_reserves), real_sol = the quote vault
+    (ticks before Oct 9 2026 have real_sol NULL and sol_res = vault only)."""
     venue: str
     tok_res: int
     sol_res: int
