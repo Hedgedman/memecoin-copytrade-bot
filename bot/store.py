@@ -243,6 +243,12 @@ class Store:
         return sum(json.loads(t or "{}").get("profile") == profile for (t,) in self.db.execute(
             "SELECT timing FROM positions WHERE status!='closed' AND timing LIKE ?", (f'%"profile": "{profile}"%',)))
 
+    def has_traded(self, chain: str, token: str, paper: bool) -> bool:
+        """Did we ever hold a NORMAL position in `token` (open or closed, any exit)? one_entry_per_token."""
+        return self.db.execute("SELECT 1 FROM positions WHERE chain=? AND token=? AND paper=? "
+                               "AND NOT (timing LIKE '%\"profile\"%') LIMIT 1",
+                               (chain, token, int(paper))).fetchone() is not None
+
     def last_exit(self, chain: str, token: str) -> float | None:
         """Last close of a NORMAL position in `token` (re-entry cooldown; profile positions have no lock)."""
         r = self.db.execute("SELECT MAX(closed_at) FROM positions WHERE chain=? AND token=? "

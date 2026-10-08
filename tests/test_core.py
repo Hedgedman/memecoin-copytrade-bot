@@ -67,6 +67,17 @@ def test_risk():
     lost.id = store.open_position(lost); lost.status, lost.exit_value, lost.closed_at = "closed", 0.5, time.time()
     store.close_position(lost)
     assert r.can_open("solana", "B", [], set(), cc)[1] == "daily loss limit hit"
+    # one_entry_per_token: Z was held (closed) -> skipped, also after a restart (new Store/RiskManager on the same db)
+    cc1 = {"one_entry_per_token": True}
+    r.cfg["reentry_cooldown_s"] = 0
+    assert r.can_open("solana", "Z", [], set(), {})[0]                  # option off (default): no block
+    r2 = RiskManager(dict(cfg, reentry_cooldown_s=0), Store(os.path.join(d, "db")), True)
+    assert r2.can_open("solana", "Z", [], set(), cc1)[1] == "already traded this token"
+    assert r2.can_open("solana", "Y", [], set(), cc1)[0]                # never held
+    assert RiskManager(cfg, Store(os.path.join(d, "db")), False).can_open("solana", "Z", [], set(), cc1)[0]  # paper row != live
+    prof = Position(None, "solana", "P", W, 1, 1.0, time.time(), None, True, timing={"profile": "x"})
+    store.open_position(prof)
+    assert r2.can_open("solana", "P", [], set(), cc1)[0]                # profile positions don't count
     open(cfg["kill_switch_file"], "w").close()
     assert r.can_open("solana", "B", [], set(), cc)[1] == "kill switch file present"
     print("risk ok")

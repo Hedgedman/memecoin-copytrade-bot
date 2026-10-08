@@ -25,6 +25,7 @@ chains:
                              # fails on it is a skip 'buy slippage exceeded' (counted by live_vs_paper). Live: 1000
     max_priority_fee_lamports: 2000000   # cap on priority fee per tx (0.002 SOL)
     only_first_leader_buy: false   # true = skip buys of tokens the leader already held
+    one_entry_per_token: false     # true = once we held a token (any exit), skip later buys of it ("already traded this token")
     min_market_cap_usd: 30000   # skip micro caps (0 = off); bot-scale, approximate
     max_market_cap_usd: 500000  # 0 = off
     max_roundtrip_loss: 0.08 # skip if buy->sell quote loses more than 8%

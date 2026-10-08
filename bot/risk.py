@@ -22,6 +22,10 @@ class RiskManager:
             return False, "max open positions"
         if any(p.token == token for p in open_positions) or (chain, token) in in_flight:
             return False, "already in this token"
+        # one_entry_per_token: a token we held once (any exit, win or loss) is never bought again. The positions
+        # table is the record, so this survives restarts.
+        if chain_cfg.get("one_entry_per_token") and self.store.has_traded(chain, token, self.paper):
+            return False, "already traded this token"
         last = self.store.last_exit(chain, token)
         if last and time.time() - last < float(self.cfg.get("reentry_cooldown_s", 1800)):
             return False, "re-entry cooldown"

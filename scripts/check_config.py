@@ -93,6 +93,7 @@ def validate(cfg: dict, want_live: bool = False) -> tuple[list[str], list[str]]:
     out.append(f"filters: market cap ${float(sol.get('min_market_cap_usd', 0) or 0):,.0f} - "
                f"${float(sol.get('max_market_cap_usd', 0) or 0):,.0f} (0 = off), min_leader_buy_sol {sol.get('min_leader_buy_sol', 0.5)}, "
                f"max_signal_age_s {sol.get('max_signal_age_s', 5)}, only_first_leader_buy {bool(sol.get('only_first_leader_buy'))}, "
+               f"one_entry_per_token {bool(sol.get('one_entry_per_token'))}, "
                f"max_roundtrip_loss {sol.get('max_roundtrip_loss', 0.08)}")
     buy_slip = int(sol.get("buy_slippage_bps", sol.get("slippage_bps", 1500)))
     if not 0 < buy_slip <= 10_000:
