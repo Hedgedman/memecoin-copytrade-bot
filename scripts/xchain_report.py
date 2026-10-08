@@ -9,7 +9,8 @@ His trades (Relay)  every leader's cross-chain buys/sells in the window, all cha
 Our paper           robinhood/bsc paper copies: buys copied / skipped, entry gap (our fill vs his price),
                     sell gap (our mirrored sell vs his), closed positions with mirrored exits (PnL USD),
                     open positions (value = realized + latest Relay quote for the rest, minus cost).
-Rows are split by profile (bot/profiles.py; 'default' = the global xchain paper settings).
+Rows are split by profile / rule (bot/profiles.py; 'H6' = normal leaders with the Solana exits since Oct 8 2026;
+'default' = older positions on the legacy mirror + safety-stop rules).
 Medians, not means: a few memecoin entries 40-70% above his price would swamp an average.
 Sample sizes are printed on purpose: a row with 1-2 trades says nothing.
 """
@@ -82,7 +83,9 @@ def main():
 
     # ---------- our paper ----------
     ours = defaultdict(lambda: {"copied": 0, "skipped": 0, "entry": [], "sellgap": [], "closed": [], "open": []})
-    profile_of = lambda timing: json.loads(timing or "{}").get("profile") or "default"
+    def profile_of(timing):
+        t = json.loads(timing or "{}")
+        return t.get("profile") or (t.get("exits") or {}).get("rule") or "default"
     last_profile = dict(db.execute(                       # a leader's skips count under his latest profile
         "SELECT leader, timing FROM positions WHERE paper=1 AND chain!='solana' ORDER BY id"))
     last_profile = {k: profile_of(v) for k, v in last_profile.items()}

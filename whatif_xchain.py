@@ -2,10 +2,12 @@
 
     python whatif_xchain.py [--db copybot.db] [--from-id N] [--leader PREFIX] [--chain bsc] [--profile NAME] [--list]
 
-Profiles: positions opened under a leader profile (bot/profiles.py) carry timing["profile"]; the others are
-"default". --profile default / trail_Leader-B selects one; the per-leader table splits by it. A trail profile
-does not mirror his sells: its own trailing_stop / stop_loss sells are replayed as price points (like
-safety_stop), so for those positions "actual" is the result that matters, not the mirror replay.
+Profiles / rules: positions opened under a leader profile (bot/profiles.py) carry timing["profile"]; normal
+leaders since Oct 8 2026 carry timing["exits"]["rule"] = "H6" (TP +30% / stop -20% / max hold, his sells
+ignored); older ones are "default" (his sells mirrored + safety stop). --profile default / H6 / trail_Leader-B
+selects one label; the per-leader table splits by it. Trail / H6 positions do not mirror his sells: their
+own trailing_stop / stop_loss / take_profit / max_hold sells are replayed as price points (like safety_stop),
+so for those positions "actual" is the result that matters, not the mirror replay.
 
 Entry-gap filter (report only): what if we had skipped a copy when our entry price was already more than
 X% above his (X = 10/20/40%)? Decided on the opening fill; add-ons of kept positions stay as they were.
@@ -29,7 +31,12 @@ import sqlite3
 
 STOPS = (None, 0.40, 0.50, 0.60, 0.70)
 STYLES = ("mirror", "first_sell", "hold")
-OWN_EXITS = ("safety_stop", "trailing_stop", "stop_loss")      # our own sells, not his trades
+OWN_EXITS = ("safety_stop", "trailing_stop", "stop_loss", "take_profit", "max_hold")   # our own sells, not his
+
+
+def rule_of(timing: str | None) -> str:
+    t = json.loads(timing or "{}")
+    return t.get("profile") or (t.get("exits") or {}).get("rule") or "default"
 
 
 def load(db, from_id, leader="", chain="", profile=""):
@@ -39,7 +46,7 @@ def load(db, from_id, leader="", chain="", profile=""):
             "SELECT id, chain, cost, exit_value, status, timing, leader FROM positions WHERE paper=1 "
             "AND chain!='solana' AND id>=? AND leader LIKE ? AND chain LIKE ? ORDER BY id",
             (from_id, leader + "%", chain or "%")):
-        prof = json.loads(timing or "{}").get("profile") or "default"
+        prof = rule_of(timing)
         if profile and prof != profile:
             continue
         rows = db.execute("SELECT ts, side, fraction, our_usd, our_tokens, reason FROM xchain_fills "
@@ -157,7 +164,7 @@ def main():
     ap.add_argument("--from-id", type=int, default=0)
     ap.add_argument("--leader", default="", help="only this leader (wallet prefix)")
     ap.add_argument("--chain", default="", help="only this chain (robinhood / bsc)")
-    ap.add_argument("--profile", default="", help="only positions opened under this profile ('default' = none)")
+    ap.add_argument("--profile", default="", help="only this profile / rule label: default, H6, trail_Leader-B, ...")
     ap.add_argument("--list", action="store_true", help="one line per position (mirror, -60%%)")
     args = ap.parse_args()
     db = sqlite3.connect(f"file:{os.path.abspath(os.path.expanduser(args.db))}?mode=ro", uri=True)

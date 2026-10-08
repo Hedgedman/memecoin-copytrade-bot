@@ -59,7 +59,7 @@ class Bot:
                 if self.paper:
                     self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, self.xchain.sol_leaders,
                                                            cfg["risk"].get("kill_switch_file", "STOP"),
-                                                           profiles=self.profiles)
+                                                           profiles=self.profiles, global_exits=cfg.get("exits") or {})
                 else:
                     log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")
 

@@ -27,6 +27,13 @@ Profiles  a leader with a profile (bot/profiles.py): size = factor x his USD, ow
           Mode "mirror": his sells are mirrored pro rata like the default leaders; the profile's stop_loss
           replaces the global safety_stop. The exits stored in the position decide, so positions opened
           before a profile existed keep their rules.
+H6        (Oct 8 2026) normal (non-profile) leaders get the Solana exits instead of mirroring his sells:
+          take_profit / stop_loss / stop_basis from the GLOBAL exits config (TP +30% on cost, stop -20% from the
+          first quote after the fill), his sells IGNORED, max_hold_h (48 h: tokenized stocks/gold that move ~0%
+          cannot be detected reliably - Relay's currency metadata only carries `verified`), marks every
+          normal_mark_interval_s (30 s, stretched when many positions would exceed the Relay budget). Stored per
+          position as timing["exits"] = {mode: "fixed", rule: "H6", ...}; positions opened before (no exits
+          stamp) keep the old rules: his sells mirrored + safety_stop.
 EVM RPC   per chain: the configured URL (env, e.g. Alchemy), the public URL as fallback.
 """
 from __future__ import annotations
@@ -46,10 +53,23 @@ TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 pad_addr = lambda a: "0x" + "0" * 24 + a.lower()[2:]
 
 
+def normal_exits_from(exits_cfg: dict | None, max_hold_h: float = 48.0) -> dict | None:
+    """H6 exits for normal leaders from the global exits config (same keys as Solana), or None = legacy rules."""
+    if exits_cfg is None:
+        return None
+    return {"mode": "fixed", "rule": "H6", "take_profit": float(exits_cfg.get("take_profit", 0.30)),
+            "stop_loss": float(exits_cfg.get("stop_loss", 0.20)), "stop_basis": exits_cfg.get("stop_basis", "entry_price"),
+            "max_hold_s": float(max_hold_h) * 3600, "follow_leader_exit": False, "trailing_activate": 0.0,
+            "trailing_pct": 0.0}
+
+
 class XchainPaperTrader:
-    def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP", profiles=None):
+    def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP", profiles=None,
+                 global_exits: dict | None = None):
         if not paper:
             raise ValueError("xchain trading is paper-only (no execution exists): set paper: true")
+        self.normal_exits = normal_exits_from(global_exits, float(cfg.get("max_hold_h", 48)))
+        self.mark_normal_s = float(cfg.get("normal_mark_interval_s", 30))
         self.store = store
         self.leaders = set(leaders)                                          # Solana leader wallets
         self.profiles = dict(profiles or {})                                 # leader -> Profile (bot/profiles.py)
@@ -97,14 +117,24 @@ class XchainPaperTrader:
             # keep mirroring his sells
             p = next((q for k, q in self.positions.items()
                       if k[0] == t.chain and k[1].lower() == t.token.lower() and k[2] == leader), None)
-            if p is not None and (p.timing.get("exits") or {}).get("mode") == "trail":   # we exit ourselves
-                log.info("xchain %s sold %s on %s: not followed (profile %s exits on its own trail/stop)",
-                         leader[:8], t.symbol, t.chain, p.timing.get("profile"))
+            if p is not None and not self._follows(p):                                   # we exit ourselves
+                log.info("xchain %s sold %s on %s: not followed (%s exits on its own rules)",
+                         leader[:8], t.symbol, t.chain, self._rule(p))
                 return
             his = {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd, "his_price_usd": t.price_usd,
                    "detected_at": detected_at}
             self._spawn(self._mirror_sell(t.chain, t.token, leader, evm, t.token_amount, detected_at,
                                           "leader_sold", his))
+
+    @staticmethod
+    def _follows(p: Position) -> bool:
+        """His sells are mirrored unless the position's stored exits say otherwise (trail / H6 fixed exits)."""
+        e = p.timing.get("exits")
+        return True if not e else bool(e.get("follow_leader_exit", True))
+
+    @staticmethod
+    def _rule(p: Position) -> str:
+        return p.timing.get("profile") or (p.timing.get("exits") or {}).get("rule") or "legacy"
 
     def hot_leaders(self) -> set[str]:
         """Leaders we hold an open paper position of (their sells are polled fastest)."""
@@ -181,6 +211,8 @@ class XchainPaperTrader:
                         "bought_usd": size, "his_bought": str(t.token_amount), "his_sold": "0"})
                     if prof is not None:
                         p.timing.update(prof.stamp(), **({} if prof.mirrors else {"peak_value": cost}))
+                    elif self.normal_exits is not None:                      # H6: Solana exits, his sells ignored
+                        p.timing["exits"] = dict(self.normal_exits)
                     p.id = self.store.open_position(p)
                     self.positions[key] = p
                     kind = "open"
@@ -192,6 +224,10 @@ class XchainPaperTrader:
                     p.timing["bought_usd"] += size
                     if "peak_value" in p.timing:                 # trail: the add's cost lifts the peak too,
                         p.timing["peak_value"] += cost           # so adding at a higher price can't trip it
+                    if p.timing.get("ref_price_usd"):            # H6 stop reference: weighted with the add's price
+                        old_rem = int(p.timing["remaining"]) - q.out_raw
+                        p.timing["ref_price_usd"] = (p.timing["ref_price_usd"] * old_rem + cost / (q.out_raw / 10 ** t.decimals)
+                                                     * q.out_raw) / int(p.timing["remaining"])
                     self.store.update_position(p)
                     kind = "add"
             finally:
@@ -274,7 +310,15 @@ class XchainPaperTrader:
     # ---------- marks + safety stop / profile trail ----------
     def _mark_interval(self, p: Position) -> float:
         prof = self.profiles.get(p.leader)
-        return prof.mark_interval_s if prof is not None and p.timing.get("profile") == prof.name else self.mark_s
+        if prof is not None and p.timing.get("profile") == prof.name:
+            return prof.mark_interval_s
+        if (p.timing.get("exits") or {}).get("rule") == "H6":
+            # 30 s per position; with many H6 positions the marks alone would exceed the Relay budget
+            # (100 calls/min, marks get the 0.7 share): stretch so marks use at most ~60% of it
+            n = sum((q.timing.get("exits") or {}).get("rule") == "H6" for q in self.positions.values())
+            budget = getattr(getattr(self.client, "limiter", None), "per_window", 100)
+            return max(self.mark_normal_s, n * 60.0 / (0.6 * budget))
+        return self.mark_s
 
     async def mark_once(self, due_only: bool = False):
         """Relay quote for each position's remaining tokens -> mark + exit checks. due_only: only positions
@@ -295,7 +339,25 @@ class XchainPaperTrader:
             self.store.mark(p, p.timing["realized_usd"] + value_rem)
             basis = p.timing["basis_usd"]
             exits = p.timing.get("exits")
-            if exits and exits.get("mode") == "trail":           # leader profile: we exit ourselves
+            if exits and exits.get("mode") == "fixed":           # H6: TP on cost, stop from the first quote, max hold
+                units = rem / 10 ** int(p.timing["decimals"])
+                price = value_rem / units if units else 0.0
+                if not p.timing.get("ref_price_usd"):
+                    p.timing["ref_price_usd"] = price            # first quote after the fill = stop reference
+                    self.store.update_position(p)
+                total = p.timing["realized_usd"] + value_rem
+                ret = total / p.cost - 1
+                ref = p.timing["ref_price_usd"] if exits.get("stop_basis", "entry_price") == "entry_price" else basis / units
+                stop_ret = price / ref - 1 if ref else 0.0
+                tp, sl, max_hold = float(exits.get("take_profit", 0)), float(exits["stop_loss"]), float(exits.get("max_hold_s", 0))
+                why = ("take_profit" if tp > 0 and ret >= tp else "stop_loss" if stop_ret <= -sl
+                       else "max_hold" if max_hold > 0 and now - p.opened_at > max_hold else None)
+                if why:
+                    log.info("xchain %s %s %s (H6): total $%.2f vs cost $%.2f (%+.0f%%), price vs first quote %+.0f%%, "
+                             "held %.1fh", why.upper(), p.chain, p.timing.get("symbol"), total, p.cost, 100 * ret,
+                             100 * stop_ret, (now - p.opened_at) / 3600)
+                    self._spawn(self._stop(p, time.time(), why))
+            elif exits and exits.get("mode") == "trail":         # leader profile: we exit ourselves
                 peak = max(p.timing.get("peak_value", basis), value_rem)
                 if peak != p.timing.get("peak_value"):
                     p.timing["peak_value"] = peak
@@ -406,9 +468,9 @@ class XchainPaperTrader:
         blk = await self._rpc(chain, "eth_getBlockByNumber", [lg["blockNumber"], False])
         his_ts = int(blk["timestamp"], 16) if isinstance(blk, dict) and blk.get("timestamp") else None
         for p in held:
-            if (p.timing.get("exits") or {}).get("mode") == "trail":
-                log.info("xchain DEX sell by %s (%s) on %s: not followed (profile %s)", evm[:10], p.leader[:8],
-                         chain, p.timing.get("profile"))
+            if not self._follows(p):
+                log.info("xchain DEX sell by %s (%s) on %s: not followed (%s)", evm[:10], p.leader[:8],
+                         chain, self._rule(p))
                 continue
             log.info("xchain DEX sell by %s (%s) on %s: %s raw %s (tx %s)", evm[:10], p.leader[:8], chain, amount,
                      p.timing.get("symbol"), tx[:12])
@@ -490,6 +552,13 @@ class XchainPaperTrader:
                  sorted(self.chains), len(self.leaders), self.mult, self.cap, self.min_usd, self.delay,
                  self.stop * 100, self.max_open, self.max_per_leader, len(self.positions),
                  [c for c in sorted(self.chains) if self.rpc.get(c) or self.rpc_fallback.get(c)] or "none")
+        if self.normal_exits is not None:
+            e = self.normal_exits
+            log.info("xchain H6 exits for normal leaders: TP +%.0f%% on cost, stop -%.0f%% from the first quote "
+                     "(%s), max hold %.0fh, his sells ignored, marks every %.0fs (%d open H6 / %d legacy positions)",
+                     100 * e["take_profit"], 100 * e["stop_loss"], e["stop_basis"], e["max_hold_s"] / 3600,
+                     self.mark_normal_s, sum(self._rule(p) == "H6" for p in self.positions.values()),
+                     sum(self._rule(p) == "legacy" for p in self.positions.values()))
         for p in self.positions.values():                         # first marks ~10 s after start
             p.last_mark_at = time.time() - self._mark_interval(p) + 10
         for leader, prof in self.profiles.items():
