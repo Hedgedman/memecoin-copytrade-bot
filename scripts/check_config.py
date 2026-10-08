@@ -94,7 +94,11 @@ def validate(cfg: dict, want_live: bool = False) -> tuple[list[str], list[str]]:
                f"${float(sol.get('max_market_cap_usd', 0) or 0):,.0f} (0 = off), min_leader_buy_sol {sol.get('min_leader_buy_sol', 0.5)}, "
                f"max_signal_age_s {sol.get('max_signal_age_s', 5)}, only_first_leader_buy {bool(sol.get('only_first_leader_buy'))}, "
                f"max_roundtrip_loss {sol.get('max_roundtrip_loss', 0.08)}")
-    out.append(f"execution: slippage_bps {sol.get('slippage_bps', 1500)}, max_priority_fee_lamports "
+    buy_slip = int(sol.get("buy_slippage_bps", sol.get("slippage_bps", 1500)))
+    if not 0 < buy_slip <= 10_000:
+        bad.append("chains.solana.buy_slippage_bps must be in (0, 10000]")
+    out.append(f"execution: buy_slippage_bps {buy_slip} (buys never retry with more; a buy that fails on it is a skip "
+               f"'buy slippage exceeded'), sell slippage_bps {sol.get('slippage_bps', 1500)} -> 3000/5000/9000 on retries, max_priority_fee_lamports "
                f"{sol.get('max_priority_fee_lamports', 2_000_000)}, confirm_timeout_s {sol.get('confirm_timeout_s', 60)}, "
                f"jupiter {host(sol.get('jupiter_base', 'https://lite-api.jup.ag/swap/v1'))} at {sol.get('jupiter_max_rps', 1.0)} rps, "
                f"Jupiter API key {'set (env)' if os.environ.get(sol.get('jupiter_api_key_env', 'JUPITER_API_KEY')) else 'NOT in env'}")

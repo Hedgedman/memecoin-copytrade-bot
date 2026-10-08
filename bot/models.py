@@ -31,6 +31,13 @@ class Fill:
     error: str | None = None
     slot: int | None = None   # slot of the pool state we filled on (paper) / landed in (live)
     model: str = ""           # how the fill was produced, e.g. "pumpfun_curve+1.5s", "jupiter+1.5s", "live"
+    # live buys only (None otherwise): the Jupiter quote this fill was placed on, in lamports per raw token,
+    # the price really paid (same SOL in, tokens received; tx + priority fees excluded), the realized slippage
+    # 100 x (fill_price / quoted_price - 1) and the slippage limit the quote was requested with
+    quoted_price: float | None = None
+    fill_price: float | None = None
+    slippage_pct: float | None = None
+    slippage_limit_bps: int | None = None
 
 
 @dataclass

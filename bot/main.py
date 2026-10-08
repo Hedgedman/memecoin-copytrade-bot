@@ -194,7 +194,16 @@ class Bot:
                 return
             fill = await adapter.buy(s.token, size)
             timing.update(filled_at=time.time(), fill_slot=fill.slot, fill_model=fill.model)
+            if fill.quoted_price:                                    # live buy: quote vs fill (lamports per raw token)
+                timing.update(buy_quoted_price=fill.quoted_price, buy_fill_price=fill.fill_price,
+                              buy_slippage_pct=fill.slippage_pct, buy_slippage_bps=fill.slippage_limit_bps,
+                              leader_price=ref)
             if not fill.ok:
+                if (fill.error or "").startswith("buy slippage exceeded"):    # missed entry, not an error (never retried)
+                    self.store.log_signal(s, "skip", fill.error)
+                    log.warning("skip %s (%s): %s", s.token, s.leader[:8], fill.error)
+                    asyncio.ensure_future(adapter.observe(s.token))
+                    return
                 self.store.log_signal(s, "buy_failed", fill.error or "")
                 log.error("BUY FAILED %s: %s", s.token, fill.error)
                 return

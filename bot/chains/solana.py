@@ -20,6 +20,7 @@ import base64
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -41,6 +42,18 @@ WSOL = "So11111111111111111111111111111111111111112"
 USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
 LAMPORTS = 1_000_000_000
+# on-chain custom error codes that mean "price moved beyond the slippage limit": Jupiter 6001 SlippageToleranceExceeded,
+# pump.fun 6002 TooMuchSolRequired / 6003 TooLittleSolReceived, PumpSwap 6004 ExceededSlippage (verify against the
+# first real failure in the log: a failed buy with another code stays `buy_failed`, not a missed entry)
+SLIPPAGE_CODES = {6001, 6002, 6003, 6004}
+SLIPPAGE_SKIP = "buy slippage exceeded"
+
+
+def is_slippage_error(err: str | None) -> bool:
+    """True for a `failed on-chain: ...` status whose custom error code is a slippage code (or says slippage)."""
+    if not err or not err.startswith("failed on-chain"):
+        return False
+    return any(int(c) in SLIPPAGE_CODES for c in re.findall(r"Custom['\"]?\s*:\s*(\d+)", err)) or "lippage" in err
 
 
 def parse_wallet_swap(tx: dict | None, wallet: str, min_quote_sol: float = 0.001):
@@ -221,6 +234,12 @@ class SolanaAdapter(ChainAdapter):
         self.jup = cfg.get("jupiter_base", "https://lite-api.jup.ag/swap/v1").rstrip("/")
         self.jup_key = os.environ.get(cfg.get("jupiter_api_key_env", "JUPITER_API_KEY"), "")
         self.slippage_bps = int(cfg.get("slippage_bps", 1500))
+        # buy_slippage_bps: slippage tolerance of the live BUY quote (default 1500 = the old slippage_bps behaviour).
+        # Buys never retry with more slippage: a buy that fails on it is a missed entry. Sells keep slippage_bps and
+        # the 3000/5000/9000 escalation of PositionManager.close.
+        self.buy_slippage_bps = int(cfg.get("buy_slippage_bps", self.slippage_bps))
+        if not 0 < self.buy_slippage_bps <= 10_000:
+            raise ValueError("chains.solana.buy_slippage_bps must be in (0, 10000]")
         self.max_prio = int(cfg.get("max_priority_fee_lamports", 2_000_000))
         self.min_leader_buy = float(cfg.get("min_leader_buy_sol", 0.5))
         self.max_roundtrip_loss = float(cfg.get("max_roundtrip_loss", 0.08))
@@ -314,9 +333,10 @@ class SolanaAdapter(ChainAdapter):
         if self.kp:
             log.info("trading wallet %s (paper=%s, key from %s)", self.kp.pubkey(), self.paper, self.key_source)
         if not self.paper:
-            log.info("LIVE execution: Jupiter quote + swap for buys AND sells (slippage %d bps on entry, sells escalate "
-                     "%d -> 3000 -> 5000 -> 9000 bps on retries), priority fee veryHigh capped at %.4f SOL, Jupiter API key %s",
-                     self.slippage_bps, self.slippage_bps, self.max_prio / LAMPORTS, "set" if self.jup_key else "MISSING")
+            log.info("LIVE execution: Jupiter quote + swap for buys AND sells (buy slippage %d bps, no retry with more; "
+                     "sells %d -> 3000 -> 5000 -> 9000 bps on retries), priority fee veryHigh capped at %.4f SOL, "
+                     "Jupiter API key %s", self.buy_slippage_bps, self.slippage_bps, self.max_prio / LAMPORTS,
+                     "set" if self.jup_key else "MISSING")
         if self.allowed_venues:
             log.info("allowed venues: %s (a buy is placed only if the pre-trade check priced it on one of these; "
                      "anything else is skipped: 'venue not allowed')", ", ".join(sorted(self.allowed_venues)))
@@ -1049,11 +1069,25 @@ class SolanaAdapter(ChainAdapter):
                 q = await self._quote(WSOL, token, lamports, priority=True)
                 return Fill(True, None, int(q["outAmount"]), amount_native + self.paper_fee,
                             model=f"jupiter+{self.paper_delay:g}s")
-            q = await self._quote(WSOL, token, lamports, priority=True)
+            q = await self._quote(WSOL, token, lamports, slippage_bps=self.buy_slippage_bps, priority=True)
             fill = await self._swap(q, token)
+            quoted = lamports / int(q["outAmount"]) if int(q["outAmount"]) else None     # lamports per raw token
+            leader = self._ref_price.get(token)
             if fill.ok:
                 self._live_tokens[token] = self._live_tokens.get(token, 0) + fill.token_amount
                 asyncio.ensure_future(self._safe_corr(token))
+                # price really paid: the same SOL went in (ExactIn), fewer tokens came out; tx/priority fees excluded
+                # (they are in fill.quote_amount = our cost). Realized slippage = how far the fill moved from the quote.
+                got = lamports / fill.token_amount if fill.token_amount else None
+                fill.quoted_price, fill.fill_price, fill.slippage_limit_bps = quoted, got, self.buy_slippage_bps
+                fill.slippage_pct = round(100 * (got / quoted - 1), 3) if got and quoted else None
+                log.info("LIVE BUY %s: quoted %s, filled %s, realized slippage %s (limit %d bps = %.1f%%), "
+                         "leader %s (our fill %s vs leader)", token, _px(quoted), _px(got), _pct(got, quoted),
+                         self.buy_slippage_bps, self.buy_slippage_bps / 100, _px(leader), _pct(got, leader))
+            elif is_slippage_error(fill.error):
+                log.warning("LIVE BUY %s: %s at %d bps (quoted %s, leader %s): %s", token, SLIPPAGE_SKIP,
+                            self.buy_slippage_bps, _px(quoted), _px(leader), fill.error)
+                fill.error = f"{SLIPPAGE_SKIP} ({self.buy_slippage_bps} bps): {fill.error}"
             return fill
         except Exception as e:
             return Fill(False, None, 0, 0.0, str(e))
@@ -1135,6 +1169,14 @@ class SolanaAdapter(ChainAdapter):
             return fill
         except Exception as e:
             return Fill(False, None, 0, 0.0, str(e))
+
+
+def _px(x: float | None) -> str:
+    return "n/a" if not x else f"{x:.4g} lamports/raw"
+
+
+def _pct(a: float | None, b: float | None) -> str:
+    return "n/a" if not a or not b else f"{100 * (a / b - 1):+.1f}%"
 
 
 def leader_token_balance(tx: dict | None, wallet: str, mint: str, which: str = "pre") -> int:

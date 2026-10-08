@@ -20,7 +20,9 @@ chains:
     buy_amount: 2.5          # SOL per trade - set to your ~$500 equivalent
     min_leader_buy_sol: 0.5  # ignore leader buys smaller than this
     max_signal_age_s: 5      # skip if leader tx is older than this when we see it
-    slippage_bps: 1500       # 15% max slippage on entry
+    slippage_bps: 1500       # 15% max slippage for SELLS (retries escalate 3000 -> 5000 -> 9000)
+    buy_slippage_bps: 1500   # max slippage of a live BUY; default = slippage_bps. Never retried: a buy that
+                             # fails on it is a skip 'buy slippage exceeded' (counted by live_vs_paper). Live: 1000
     max_priority_fee_lamports: 2000000   # cap on priority fee per tx (0.002 SOL)
     only_first_leader_buy: false   # true = skip buys of tokens the leader already held
     min_market_cap_usd: 30000   # skip micro caps (0 = off); bot-scale, approximate

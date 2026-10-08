@@ -320,8 +320,18 @@ def live_vs_paper_tests():
     # live take profit, paper matched take profit
     pos(live, False, "T3", 1.0, 1000, t0 + 200, 1.31, "take_profit")
     pos(paper, True, "T3", 2.0, 2000, t0 + 190, 2.6, "take_profit")
+    # T3 carries the live buy quote figures in timing; a failed buy (skip) after the first position counts as missed
+    live.db.execute("UPDATE positions SET timing=? WHERE token='T3'",
+                    ('{"buy_quoted_price": 950000.0, "buy_fill_price": 1000000.0, "buy_slippage_pct": 5.263, "buy_slippage_bps": 1000}',))
+    live.db.execute("INSERT INTO signals(ts,chain,leader,side,token,token_amount,quote_amount,action,reason) "
+                    "VALUES(?,'solana',?,'buy','T9','1','1.0','skip','buy slippage exceeded (1000 bps): failed on-chain')", (t0 + 50, A))
+    live.db.commit()
     rows, s = compare(live.db, paper.db, now=t0 + 4000)
     by = {r["token"]: r for r in rows}
+    assert by["T3"]["quoted"] == 950000.0 / 1e9 and by["T3"]["buy_slip"] == 5.263 and by["T3"]["buy_slip_limit"] == 1000, by["T3"]
+    assert by["T1"]["quoted"] is None and by["T1"]["buy_slip"] is None
+    assert s["filled"] == 3 and s["missed"] == 1 and s["n_slip"] == 1 and s["median_buy_slip"] == 5.263, s
+    assert compare(live.db, paper.db, from_id=by["T3"]["id"], now=t0 + 4000)[1]["missed"] == 0   # skip was before T3 opened
     assert abs(by["T1"]["fill_gap"] - (-5.0)) < 1e-6 and abs(by["T1"]["points"] - (-3.0)) < 1e-6, by["T1"]
     assert abs(by["T1"]["live_leader_gap"] - (100 / 0.9 - 100)) < 1e-6
     assert by["T2"]["paper_fill"] is None and by["T2"]["pnl"] is None and by["T2"]["points"] is None
@@ -338,6 +348,114 @@ def live_vs_paper_tests():
     assert st[(A, "solana")]["trades"] == 3 and (A, "solana") not in lr_collect(live.db, peak_h=6.0, paper=1)
     print("live_vs_paper: same-signal match, fill gap, leader gap, stop points, kill rules; leader_report --live")
 
+
+async def buy_slippage_tests():
+    from bot.chains.solana import is_slippage_error
+    assert is_slippage_error("failed on-chain: {'InstructionError': [3, {'Custom': 6001}]}")
+    assert is_slippage_error("failed on-chain: {'InstructionError': [3, {'Custom': 6004}]}")
+    assert not is_slippage_error("failed on-chain: {'InstructionError': [3, {'Custom': 6020}]}")
+    assert not is_slippage_error("not confirmed in time - may still land, CHECK WALLET") and not is_slippage_error(None)
+    # config: default 1500 (= the old slippage_bps behaviour), the live value 1000, own value
+    for cfgs, want in (({}, 1500), ({"slippage_bps": 1000}, 1000), ({"buy_slippage_bps": 1000}, 1000),
+                       ({"buy_slippage_bps": 500, "slippage_bps": 1500}, 500)):
+        a = adapter(False, **cfgs)
+        assert a.buy_slippage_bps == want and a.slippage_bps == cfgs.get("slippage_bps", 1500), (cfgs, a.buy_slippage_bps)
+    for bad in (0, 10_001):
+        try:
+            adapter(False, buy_slippage_bps=bad)
+            raise AssertionError(f"{bad} must be refused")
+        except ValueError:
+            pass
+    seen, done = capture("solana")
+    a = adapter(False, buy_slippage_bps=1000, slippage_bps=1500)
+    mint = "Mint11111111111111111111111111111111111111"
+    a._ref_price[mint] = 900.0                                      # leader paid 900 lamports per raw token
+    calls = []
+    async def quote(in_m, out_m, amount, slippage_bps=None, priority=False):
+        calls.append(slippage_bps)
+        return {"outAmount": str(amount // 1000)}                  # quoted 1000 lamports per raw: 1e6 raw for 1 SOL
+    a._quote = quote
+    async def corr(token): pass
+    a._safe_corr = corr
+    async def swap_ok(q, m): return Fill(True, "sig", 950_000, 1.0 + 0.0025, model="live")   # 5% fewer tokens, fees in cost
+    a._swap = swap_ok
+    f = await a.buy(mint, 1.0)
+    assert f.ok and calls == [1000], calls                          # the BUY quote asked for buy_slippage_bps
+    assert f.quoted_price == 1000.0 and abs(f.fill_price - 1e9 / 950_000) < 1e-9 and f.slippage_limit_bps == 1000, f
+    assert abs(f.slippage_pct - 100 * (1e9 / 950_000 / 1000 - 1)) < 1e-3 and abs(f.slippage_pct - 5.263) < 0.001, f
+    line = [m for _, m in seen if m.startswith("LIVE BUY")][0]
+    for want in ("quoted 1000 lamports/raw", "filled 1053 lamports/raw", "realized slippage +5.3%", "limit 1000 bps = 10.0%",
+                 "leader 900 lamports/raw", "our fill +17.0% vs leader"):
+        assert want in line, (want, line)
+    async def swap_fail(q, m): return Fill(False, "sig", 0, 0.0, "failed on-chain: {'InstructionError': [3, {'Custom': 6001}]}")
+    a._swap = swap_fail
+    calls.clear()
+    f = await a.buy(mint, 1.0)
+    assert not f.ok and f.error.startswith("buy slippage exceeded (1000 bps)") and calls == [1000], (f, calls)   # one try only
+    assert f.quoted_price is None and f.slippage_pct is None
+    assert any(lvl == "WARNING" and "buy slippage exceeded at 1000 bps (quoted 1000 lamports/raw, leader 900" in m for lvl, m in seen), seen
+    async def swap_other(q, m): return Fill(False, "sig", 0, 0.0, "not confirmed in time")
+    a._swap = swap_other
+    assert (await a.buy(mint, 1.0)).error == "not confirmed in time"
+    done()
+    # sells keep slippage_bps (the escalation is PositionManager's: None, 3000, 5000, 9000)
+    sold = []
+    async def q2(in_m, out_m, amount, slippage_bps=None, priority=False):
+        sold.append(slippage_bps); return {"outAmount": "1"}
+    a._quote = q2
+    async def swap2(q, m): return Fill(True, "s", 1, 1.0)
+    a._swap = swap2
+    await a.sell(Position(1, "solana", mint, A, 1000, 1.0, time.time(), None, False), None)
+    await a.sell(Position(1, "solana", mint, A, 1000, 1.0, time.time(), None, False), 3000)
+    assert sold == [None, 3000], sold                               # None -> _quote falls back to slippage_bps 1500
+    pm_slips = [[None, 3000, 5000, 9000][min(n, 3)] for n in range(5)]
+    assert pm_slips == [None, 3000, 5000, 9000, 9000]
+    # Bot: a slippage failure is a skip (missed entry), not buy_failed, and is never retried
+    b = Bot(bot_cfg(False, leader_allowlist=[A], buy_slippage_bps=1000))
+    class Sol2(Sol):
+        n = 0
+        async def buy(self, token, size):
+            Sol2.n += 1
+            return Fill(False, "sig", 0, 0.0, "buy slippage exceeded (1000 bps): failed on-chain: {...6001}")
+    s2 = Sol2(); b.adapters["solana"] = s2
+    await b.handle_buy(Signal("solana", A, "buy", "TOKS", 10, 1.0, "sig-s", int(time.time())))
+    await asyncio.sleep(0.01)
+    rows = b.store.db.execute("SELECT action, reason FROM signals").fetchall()
+    assert len(rows) == 1 and rows[0][0] == "skip" and rows[0][1].startswith("buy slippage exceeded") and Sol2.n == 1, rows
+    assert b.pm.open() == [] and s2.observed == ["TOKS"]
+    # Bot: a filled live buy stores quote, fill price, realized slippage, limit and the leader's price in timing
+    class Sol3(Sol):
+        async def buy(self, token, size):
+            return Fill(True, "sig", 950_000, 1.0025, model="live", quoted_price=1000.0, fill_price=1e9 / 950_000,
+                        slippage_pct=5.263, slippage_limit_bps=1000)
+    b.adapters["solana"] = Sol3()
+    await b.handle_buy(Signal("solana", A, "buy", "TOKF", 1_000_000, 0.9, "sig-f", int(time.time())))   # leader: 900/raw
+    (p,) = b.pm.open()
+    tm = p.timing
+    assert tm["buy_quoted_price"] == 1000.0 and tm["buy_slippage_pct"] == 5.263 and tm["buy_slippage_bps"] == 1000
+    assert abs(tm["buy_fill_price"] - 1e9 / 950_000) < 1e-9 and abs(tm["leader_price"] - 900.0) < 1e-9, tm
+    assert "buy_quoted_price" in b.store.db.execute("SELECT timing FROM positions WHERE id=?", (p.id,)).fetchone()[0]
+    # paper fill: no quote figures, nothing stored
+    b2 = Bot(bot_cfg(True, leader_allowlist=[A]))
+    b2.adapters["solana"] = Sol()
+    await b2.handle_buy(Signal("solana", A, "buy", "TOKP", 10, 1.0, "sig-p", int(time.time())))
+    assert "buy_quoted_price" not in b2.pm.open()[0].timing
+    # reports count missed entries
+    from scripts.leader_report import missed_entries
+    assert missed_entries(b.store.db) == {A: 1}
+    # check_config shows the buy limit and refuses a bad one
+    ok, out = validate({"paper": True, "chains": {"solana": {"enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x",
+                       "leaders": [A], "buy_amount": 1.0, "buy_slippage_bps": 1000, "private_key_env": "TEST_BOT_KEY"}},
+                       "risk": {"kill_switch_file": tempfile.mktemp()}, "exits": {"stop_loss": 0.2}})
+    assert "buy_slippage_bps 1000 (buys never retry" in "\n".join(out) and "sell slippage_bps 1500 -> 3000/5000/9000" in "\n".join(out), out
+    ok, _ = validate({"paper": True, "chains": {"solana": {"enabled": True, "rpc_http": "http://x", "rpc_ws": "ws://x",
+                     "leaders": [A], "buy_amount": 1.0, "buy_slippage_bps": 0, "private_key_env": "TEST_BOT_KEY"}},
+                     "risk": {"kill_switch_file": tempfile.mktemp()}, "exits": {"stop_loss": 0.2}})
+    assert any("buy_slippage_bps" in m for m in ok), ok
+    print("buy_slippage_bps: default 1500 / live 1000, buy quote uses it, one try, slippage failure = skip 'buy slippage "
+          "exceeded' + observe (never retried), other failures stay buy_failed, sells unchanged, LIVE BUY log, quote + "
+          "realized slippage in timing, check_config, missed entries counted")
+
 def main():
     asyncio.run(allowlist_tests())
     asyncio.run(venue_tests())
@@ -347,6 +465,7 @@ def main():
     check_config_tests()
     reclaim_tests()
     live_vs_paper_tests()
+    asyncio.run(buy_slippage_tests())
     print("ALL PASSED")
 
 

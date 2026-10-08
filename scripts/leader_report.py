@@ -87,6 +87,12 @@ def solana_gap(db, p):
     return 100 * (ours / his - 1) if his > 0 else None
 
 
+def missed_entries(db, since: float = 0.0) -> dict[str, int]:
+    """Buys skipped because the live buy slippage limit was exceeded (reason 'buy slippage exceeded...'), per leader."""
+    return dict(db.execute("SELECT leader, COUNT(*) FROM signals WHERE action='skip' AND reason LIKE 'buy slippage exceeded%' "
+                           "AND ts>=? GROUP BY leader", (since,)))
+
+
 def collect(db, from_id=0, hours=None, peak_h=6.0, sol_usd=None, flagged=None, paper=1):
     """-> {(leader, scope): stats}. scope in ('solana', 'xchain', 'all'). flagged = {id: reason} to leave out."""
     since = time.time() - hours * 3600 if hours else 0.0
@@ -215,6 +221,11 @@ def main():
     nx = sum(s["trades"] for (l, sc), s in stats.items() if sc == "xchain")
     ps = sum(s["pnl"] or 0 for (l, sc), s in stats.items() if sc == "solana")
     px = sum(s["pnl"] or 0 for (l, sc), s in stats.items() if sc == "xchain")
+    if a.live:
+        since = db.execute("SELECT MIN(opened_at) FROM positions WHERE paper=0 AND id>=?", (a.from_id,)).fetchone()[0] or 0.0
+        miss = missed_entries(db, since if a.from_id else 0.0)
+        print(f"\nMISSED ENTRIES (buy slippage exceeded, never retried): {sum(miss.values())}"
+              + "".join(f" | {l[:8]} {n}" for l, n in sorted(miss.items(), key=lambda kv: -kv[1])))
     print(f"\n{'total':<17} solana {ns} trades {ps:+,.2f} SOL | xchain {nx} trades {px:+,.2f} USD | "
           f"{len([l for l in leaders if leaders[l] >= a.small])} of {len(leaders)} leaders have >= {a.small} trades")
     print(f"  (sorted by trades; `~` = peak partly from marks; gap on Solana includes the paper fee; "
