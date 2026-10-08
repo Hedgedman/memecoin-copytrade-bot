@@ -43,6 +43,11 @@ class PositionManager:
         self.switch_confirm = float(cfg.get("switch_confirm_s", 2.0))
         self.positions: list[Position] = []
         self._checking: set[int] = set()
+        log.info("exits: take_profit %s, stop_loss %s (stop_basis %s), trailing %s, max_hold_s %s, "
+                 "follow_leader_exit %s, poll %.2fs",
+                 f"+{100 * self.tp:.0f}% on cost" if self.tp > 0 else "off", f"-{100 * self.sl:.0f}%", self.stop_basis,
+                 f"{100 * self.trail_pct:.0f}% after +{100 * self.trail_act:.0f}%" if self.trail_pct > 0 else "off",
+                 f"{self.max_hold:g}" if self.max_hold > 0 else "off", self.follow_exit, self.poll)
 
     def open(self) -> list[Position]:
         return [p for p in self.positions if p.status != "closed"]
@@ -136,6 +141,15 @@ class PositionManager:
         lag = p.closed_at - p.timing["exit_trigger_at"]
         log.info("CLOSED %s reason=%s pnl=%+.4f (%+.1f%%) held=%.0fs exit_lag=%.2fs", p.token, reason, pnl,
                  100 * pnl / p.cost, p.closed_at - p.opened_at, lag)
+        model = p.timing.get("exit_trigger_value")
+        if not p.paper and reason == "stop_loss" and model:
+            # the paper model books the stop at the quote that triggered it (pool maths x correction, or Jupiter);
+            # the live fill is what the swap really returned: the gap is the live-vs-paper slippage of this stop
+            realized = float(p.timing.get("realized", 0.0)) + model
+            gap = 100 * (p.exit_value - realized) / p.cost
+            log.warning("LIVE STOP %s: filled %.4f vs model %.4f at trigger (%+.1f points of cost, %+.1f%% vs model), "
+                        "exit lag %.2fs, attempts %d", p.token, p.exit_value, realized, gap,
+                        100 * (p.exit_value / realized - 1), lag, p.sell_attempts + 1)
 
     async def _check(self, p: Position):
         key = id(p)

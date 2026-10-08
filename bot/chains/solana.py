@@ -30,6 +30,7 @@ from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
 
 from ..models import Fill, Position, Signal
+from ..secrets import get_secret
 from ..pricing.pools import (AccountHub, PoolState, PUMP_PROGRAM, PUMPSWAP_PROGRAM,
                              curve_pda, decode_curve, decode_token_amount, find_pool_vaults)
 from .base import ChainAdapter, RateLimited
@@ -242,6 +243,10 @@ class SolanaAdapter(ChainAdapter):
         self.ref_band = (float(lo), float(hi))
         self.max_watched = int(cfg.get("max_watched_pools", 60))
         self.record_skipped = bool(cfg.get("record_skipped", True))
+        # allowed_venues (optional, Oct 8 2026 / H8-LIVE): a buy is placed only if the pre-trade check priced it on one
+        # of these pool venues. Tokens without such a pool, vault venues not listed, and tokens whose pool model failed
+        # the fill-sanity guard are SKIPPED ("venue not allowed"): the Jupiter fallback becomes a skip, never a buy.
+        self.allowed_venues = set(cfg.get("allowed_venues") or [])
         # live only: pool price x correction factor measured against Jupiter (see _update_corr)
         self.corr_interval = float(cfg.get("live_price_check_s", 60))
         self._corr: dict[str, float] = {}         # token -> Jupiter value / pool-model value
@@ -254,6 +259,10 @@ class SolanaAdapter(ChainAdapter):
         self.vault_venues = set(cfg.get("vault_pricing_venues", ["meteora_damm_v2"]))
         for v in self.vault_venues:
             self.fee_bps.setdefault(v, int(cfg.get(f"{v}_fee_bps", 100)))
+        bad = self.allowed_venues - self.pool_venues - self.vault_venues
+        if bad:
+            raise ValueError(f"chains.solana.allowed_venues: {sorted(bad)} are not pool-priced venues "
+                             f"(pool_pricing_venues {sorted(self.pool_venues)}, vault_pricing_venues {sorted(self.vault_venues)})")
         self.vault_check_s = float(cfg.get("vault_check_s", 20))      # re-calibrate open vault pools
         self.vault_ref_sol = float(cfg.get("buy_amount", 0.5))       # size used to calibrate
         self._hint_venue: dict[str, str] = {}       # mint -> venue guessed from the leader's tx
@@ -284,11 +293,18 @@ class SolanaAdapter(ChainAdapter):
         self._sol_usd_val, self._sol_usd_ts = 0.0, 0.0
         self.throttle = _Throttle(float(cfg.get("jupiter_max_rps", 1.0)))
         self.kp: Keypair | None = None
-        key = os.environ.get(cfg.get("private_key_env", "SOL_PRIVATE_KEY"))
+        # the wallet key: the env var named by private_key_env, else (private_key_keychain: true) the macOS keychain
+        # item of the same name (account copybot, see bot/secrets.py). The value is never logged.
+        key_name = cfg.get("private_key_env", "SOL_PRIVATE_KEY")
+        self.key_source = "env" if os.environ.get(key_name) else "keychain"
+        key = get_secret(key_name, use_keychain=bool(cfg.get("private_key_keychain", False)))
         if key:
             self.kp = Keypair.from_base58_string(key)
         elif not paper:
-            raise RuntimeError("Live mode needs a private key in the env var named by private_key_env")
+            raise RuntimeError(f"Live mode needs the wallet key: env var {key_name}, or the keychain item "
+                               f"{key_name} (account copybot) with private_key_keychain: true")
+        else:
+            self.key_source = "none"
         self.session: aiohttp.ClientSession | None = None
         self._seen: OrderedDict[str, None] = OrderedDict()
 
@@ -296,7 +312,14 @@ class SolanaAdapter(ChainAdapter):
     async def start(self):
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         if self.kp:
-            log.info("trading wallet %s (paper=%s)", self.kp.pubkey(), self.paper)
+            log.info("trading wallet %s (paper=%s, key from %s)", self.kp.pubkey(), self.paper, self.key_source)
+        if not self.paper:
+            log.info("LIVE execution: Jupiter quote + swap for buys AND sells (slippage %d bps on entry, sells escalate "
+                     "%d -> 3000 -> 5000 -> 9000 bps on retries), priority fee veryHigh capped at %.4f SOL, Jupiter API key %s",
+                     self.slippage_bps, self.slippage_bps, self.max_prio / LAMPORTS, "set" if self.jup_key else "MISSING")
+        if self.allowed_venues:
+            log.info("allowed venues: %s (a buy is placed only if the pre-trade check priced it on one of these; "
+                     "anything else is skipped: 'venue not allowed')", ", ".join(sorted(self.allowed_venues)))
         self._tasks = [asyncio.create_task(self.hub.run(self._stop)),
                        asyncio.create_task(self._flush_ticks_loop()),
                        asyncio.create_task(self._janitor_loop()),
@@ -924,8 +947,15 @@ class SolanaAdapter(ChainAdapter):
                     pass
                 pool = self._pools.get(token)
             if pool and pool.state and (pool.venue not in self.vault_venues or token in self._corr):
+                if self.allowed_venues and pool.venue not in self.allowed_venues:
+                    return False, f"venue not allowed: {pool.venue} (allowed: {', '.join(sorted(self.allowed_venues))})"
                 if self._model_ok(token, pool):
                     return await self._check_on_pool(pool, lamports, supply, token)
+                if self.allowed_venues:      # fill-sanity guard rejected the model: no Jupiter fallback
+                    return False, f"venue not allowed: {pool.venue} model rejected by the fill-sanity guard, no Jupiter fallback"
+            if self.allowed_venues:
+                return False, (f"venue not allowed: no {'/'.join(sorted(self.allowed_venues))} pool "
+                               f"({'vault venue not calibrated' if pool else 'jupiter-priced'})")
             return await self._check_on_jupiter(token, lamports, supply)
         except RateLimited:
             return False, "check error: jupiter rate limit"
@@ -1014,6 +1044,8 @@ class SolanaAdapter(ChainAdapter):
                     return Fill(True, None, st.buy_out(lamports, self.fee_bps[pool.venue]),
                                 amount_native + self.paper_fee, slot=st.slot,
                                 model=f"{pool.venue}+{self.paper_delay:g}s")
+                if self.allowed_venues:      # pool gone / model rejected since the check: skip, never a Jupiter fill
+                    return Fill(False, None, 0, 0.0, "venue not allowed: pool not usable at fill time, no Jupiter fallback")
                 q = await self._quote(WSOL, token, lamports, priority=True)
                 return Fill(True, None, int(q["outAmount"]), amount_native + self.paper_fee,
                             model=f"jupiter+{self.paper_delay:g}s")

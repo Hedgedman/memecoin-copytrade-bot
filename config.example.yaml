@@ -10,9 +10,13 @@ chains:
     rpc_http: "https://YOUR-RPC-PROVIDER"      # paid RPC (Helius/Triton/...) strongly advised
     rpc_ws: "wss://YOUR-RPC-PROVIDER"
     private_key_env: SOL_PRIVATE_KEY            # base58 key of a DEDICATED bot wallet
+    private_key_keychain: false  # true: read it from the macOS keychain (security find-generic-password -a copybot -s SOL_PRIVATE_KEY) if not in the env
     jupiter_base: "https://lite-api.jup.ag/swap/v1"   # verify current Jupiter endpoint
     jupiter_api_key_env: JUPITER_API_KEY        # optional, for paid tier
     leaders: []                                 # wallet addresses you want to follow
+    # leader_allowlist: [ <wallet> ]   # optional (H8-LIVE): ONLY these leaders open positions; all other leaders become watch
+    # allowed_venues: [ pumpfun_curve, pumpswap_amm ]   # optional (H8-LIVE): buy only if the pre-trade check priced it on one
+    #                                                   # of these pool venues; else skip 'venue not allowed' (no Jupiter fallback)
     buy_amount: 2.5          # SOL per trade - set to your ~$500 equivalent
     min_leader_buy_sol: 0.5  # ignore leader buys smaller than this
     max_signal_age_s: 5      # skip if leader tx is older than this when we see it

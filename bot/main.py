@@ -50,8 +50,32 @@ class Bot:
                     raise ValueError(f"chains.{name}.leader_status.{leader}: unknown status {status!r}")
                 if status == "watch":
                     self.watch.add(leader)
+        # leader_allowlist (chains.<chain>.leader_allowlist, optional list, Oct 8 2026 / H8-LIVE): ONLY these leaders
+        # open positions; every other streamed leader becomes watch (signals + price paths recorded, no positions)
+        for name, c in cfg["chains"].items():
+            allow = c.get("leader_allowlist")
+            if not allow:
+                continue
+            unknown = [w for w in allow if w not in (c.get("leaders") or [])]
+            if unknown:
+                raise ValueError(f"chains.{name}.leader_allowlist: {[w[:8] for w in unknown]} not in chains.{name}.leaders "
+                                 f"(a leader must be streamed to be copied)")
+            others = [w for w in (c.get("leaders") or []) if w not in allow]
+            self.watch.update(others)
+            log.info("leader allowlist (%s): %d of %d leaders open positions (%s); %d watch-only", name, len(allow),
+                     len(c.get("leaders") or []), ", ".join(w[:8] for w in allow), len(others))
+            for w in allow:
+                if w in self.watch:
+                    raise ValueError(f"chains.{name}.leader_allowlist: {w[:8]} is also leader_status watch")
         if self.watch:
             log.info("watch-only leaders (signals recorded, no positions): %s", ", ".join(w[:8] for w in sorted(self.watch)))
+        r = cfg["risk"]
+        log.info("risk: max_open_positions %s, reentry_cooldown_s %s, kill switch file %s; daily_loss_limit %s "
+                 "(realized PnL of closed normal positions since 00:00 UTC; blocks new buys only, open positions "
+                 "keep their exits); buy_amount %s", r.get("max_open_positions", 3), r.get("reentry_cooldown_s", 1800),
+                 r.get("kill_switch_file", "STOP"),
+                 ", ".join(f"{n} {c.get('daily_loss_limit', 0)}" for n, c in cfg["chains"].items() if c.get("enabled")),
+                 ", ".join(f"{n} {c.get('buy_amount')}" for n, c in cfg["chains"].items() if c.get("enabled")))
         self.in_flight: set[tuple[str, str, str]] = set()        # (chain, token, profile name or "")
         if "solana" in self.adapters:                             # profile leaders: min_usd instead of min_leader_buy_sol
             self.adapters["solana"].min_buy_exempt = set(self.profiles)
@@ -79,6 +103,7 @@ class Bot:
                     log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")
 
     def _skip(self, s: Signal, why: str):
+        log.info("skip %s (%s): %s", s.token, s.leader[:8], why)
         self.store.log_signal(s, "skip", why)
         a = self.adapters.get(s.chain)
         if a is not None:    # keep recording its price path: what would have happened?
@@ -164,6 +189,7 @@ class Bot:
             ok, why = await adapter.pre_trade_check(s.token, size, ref_price=ref)
             timing["checked_at"] = time.time()
             if not ok:
+                log.info("skip %s (%s): %s", s.token, s.leader[:8], why)
                 self.store.log_signal(s, "skip", why)
                 return
             fill = await adapter.buy(s.token, size)

@@ -87,12 +87,12 @@ def solana_gap(db, p):
     return 100 * (ours / his - 1) if his > 0 else None
 
 
-def collect(db, from_id=0, hours=None, peak_h=6.0, sol_usd=None, flagged=None):
+def collect(db, from_id=0, hours=None, peak_h=6.0, sol_usd=None, flagged=None, paper=1):
     """-> {(leader, scope): stats}. scope in ('solana', 'xchain', 'all'). flagged = {id: reason} to leave out."""
     since = time.time() - hours * 3600 if hours else 0.0
     cols = [r[1] for r in db.execute("PRAGMA table_info(positions)")]
     rows = [dict(zip(cols, r)) for r in db.execute(
-        "SELECT * FROM positions WHERE paper=1 AND id>=? AND opened_at>=? ORDER BY id", (from_id, since))
+        "SELECT * FROM positions WHERE paper=? AND id>=? AND opened_at>=? ORDER BY id", (int(paper), from_id, since))
         if r[0] not in (flagged or {})]
     per = defaultdict(lambda: {"pnl": [], "pct": [], "peak": [], "gap": [], "open": 0, "venues": defaultdict(int),
                                "peak_marks": 0})
@@ -170,17 +170,19 @@ def main():
     ap.add_argument("--peak-h", type=float, default=6.0, help="Solana: ticks window after the fill for the peak")
     ap.add_argument("--sol-usd", type=float, default=None, help="SOL price to combine Solana + xchain PnL in USD")
     ap.add_argument("--include-flagged", action="store_true", help="keep positions the DATA RULE flags")
+    ap.add_argument("--live", action="store_true", help="LIVE positions (paper=0) instead of paper positions")
     a = ap.parse_args()
     db = open_db(a.db)
     flagged = flagged_positions(db)
     print(flagged_note(flagged, a.include_flagged))
     for pid in sorted(flagged):
         print(f"  #{pid:<5} {flagged[pid]}")
-    stats = collect(db, a.from_id, a.hours, a.peak_h, a.sol_usd, None if a.include_flagged else flagged)
+    stats = collect(db, a.from_id, a.hours, a.peak_h, a.sol_usd, None if a.include_flagged else flagged,
+                    paper=0 if a.live else 1)
     when = f"last {a.hours:g} h" if a.hours else "all history"
     if a.from_id:
         when += f", positions >= #{a.from_id}"
-    print(f"LEADER SCORECARD - {when} - paper positions, closed only (open shown separately)")
+    print(f"LEADER SCORECARD - {when} - {'LIVE' if a.live else 'paper'} positions, closed only (open shown separately)")
     print("peak = median highest price after our fill (Solana: pool ticks, exit-independent; * = from marks, "
           "exit-dependent)\n")
     hdr = (f"{'leader':<9} {'scope':<7} {'trades':>6} {'open':>4} {'wins':>4} {'PnL':>11} {'w/o best':>11} "
@@ -208,7 +210,7 @@ def main():
                   f"{venues_str(s['venues']):<16} {flag}")
         shown += 1
     if not shown:
-        print("  no closed paper positions in this window")
+        print(f"  no closed {'live' if a.live else 'paper'} positions in this window")
     ns = sum(s["trades"] for (l, sc), s in stats.items() if sc == "solana")
     nx = sum(s["trades"] for (l, sc), s in stats.items() if sc == "xchain")
     ps = sum(s["pnl"] or 0 for (l, sc), s in stats.items() if sc == "solana")
