@@ -2,6 +2,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import time
 
 import yaml
@@ -40,7 +41,9 @@ class Bot:
         self.pm = PositionManager(cfg["exits"], self.adapters, self.store)
         self.risk = RiskManager(cfg["risk"], self.store, self.paper)
         self.profiles = load_profiles(cfg, self.paper)          # per-leader exits + sizing (paper only)
-        self.in_flight: set[tuple[str, str]] = set()
+        self.in_flight: set[tuple[str, str, str]] = set()        # (chain, token, profile name or "")
+        if "solana" in self.adapters:                             # profile leaders: min_usd instead of min_leader_buy_sol
+            self.adapters["solana"].min_buy_exempt = set(self.profiles)
         self.queue: asyncio.Queue = asyncio.Queue()
         for name, a in self.adapters.items():
             a.set_price_callback(lambda token, chain=name: self.pm.on_tick(chain, token))
@@ -69,31 +72,58 @@ class Bot:
         if a is not None:    # keep recording its price path: what would have happened?
             asyncio.ensure_future(a.observe(s.token))
 
+    def _profile_position(self, chain: str, token: str, leader: str) -> Position | None:
+        """Our open position of a profile leader in this token (profile positions are keyed by leader + token)."""
+        return next((p for p in self.pm.open() if p.chain == chain and p.token == token and p.leader == leader
+                     and p.timing.get("profile")), None)
+
+    def _profile_can_open(self, prof, sol_usd: float, key: tuple) -> str | None:
+        """Own limits of a leader profile (new positions only; adds are capped by max_usd_per_token)."""
+        if os.path.exists(self.cfg["risk"].get("kill_switch_file", "STOP")):
+            return "kill switch file present"
+        n = self.store.profile_open_count(prof.name) + sum(k[2] == prof.name and k != key for k in self.in_flight)
+        if n >= prof.max_open_tokens:
+            return f"profile {prof.name}: max open tokens ({prof.max_open_tokens})"
+        lost = self.store.profile_pnl_today_usd(prof.name, sol_usd)
+        if lost <= -prof.daily_loss_usd:
+            return f"profile {prof.name}: daily loss limit ${prof.daily_loss_usd:,.0f} hit (${lost:,.0f})"
+        return None
+
     async def handle_buy(self, s: Signal):
         ccfg = self.chain_cfg[s.chain]
         age = time.time() - s.block_time if s.block_time else 0
         if age > float(ccfg.get("max_signal_age_s", 5)):
             self._skip(s, f"stale {age:.1f}s")
             return
+        prof = self.profiles.get(s.leader) if s.chain == "solana" else None
+        held = self._profile_position(s.chain, s.token, s.leader) if prof is not None else None
         # only copy a leader's FIRST buy of a token: skip add-on buys (he already held it).
         # Dust left over from an earlier exit (< 5% of this buy) doesn't count as holding.
-        if (ccfg.get("only_first_leader_buy") and s.leader_pre_amount
+        # Profile leaders: his adds ARE the signal (copied into our position, 3.3), so no first-buy filter.
+        if (prof is None and ccfg.get("only_first_leader_buy") and s.leader_pre_amount
                 and s.leader_pre_amount > 0.05 * max(1, s.token_amount)):
             self._skip(s, "leader already held this token (add-on buy)")
             return
-        ok, why = self.risk.can_open(s.chain, s.token, self.pm.open(), self.in_flight, ccfg)
-        if not ok:
-            self._skip(s, why)
-            return
+        if prof is None:
+            # normal leaders: the global limits, counted over NORMAL positions only (profile positions are
+            # separate: they never block a token, never count toward max_open / daily loss)
+            normal_open = [p for p in self.pm.open() if not p.timing.get("profile")]
+            normal_flight = {(c, t) for c, t, who in self.in_flight if not who}
+            ok, why = self.risk.can_open(s.chain, s.token, normal_open, normal_flight, ccfg)
+            if not ok:
+                self._skip(s, why)
+                return
         timing = {"leader_slot": s.slot, "leader_block_time": s.block_time,
                   "leader_pre_amount": s.leader_pre_amount, "leader_buy_amount": s.token_amount,
                   "notified_at": s.notified_at, "fetched_at": s.fetched_at, "decided_at": time.time()}
-        key = (s.chain, s.token)
+        key = (s.chain, s.token, prof.name if prof is not None else "")
+        if key in self.in_flight:
+            self._skip(s, "already buying this token")
+            return
         self.in_flight.add(key)
         try:
             adapter = self.adapters[s.chain]
             size = float(ccfg["buy_amount"])
-            prof = self.profiles.get(s.leader) if s.chain == "solana" else None
             if prof is not None:
                 # proportional: his USD size x factor (s.quote_amount is SOL, also for his USDC buys)
                 try:
@@ -101,12 +131,19 @@ class Bot:
                 except Exception as e:
                     self._skip(s, f"profile {prof.name}: SOL price unavailable ({type(e).__name__})")
                     return
-                usd, why = prof.size_usd(s.quote_amount * sol_usd)
+                already = float(held.timing.get("bought_usd") or held.timing.get("our_usd") or 0) if held else 0.0
+                usd, why = prof.size_usd(s.quote_amount * sol_usd, already)   # trimmed to the room left
                 if why:
                     self._skip(s, why)
                     return
+                if held is None:
+                    why = self._profile_can_open(prof, sol_usd, key)
+                    if why:
+                        self._skip(s, why)
+                        return
                 size = usd / sol_usd
-                timing.update(prof.stamp(), his_usd=round(s.quote_amount * sol_usd, 2), our_usd=round(usd, 2))
+                timing.update(prof.stamp(), his_usd=round(s.quote_amount * sol_usd, 2), our_usd=round(usd, 2),
+                              bought_usd=round(usd, 2))
             # the leader's fill price (lamports per raw unit): sanity reference for the adapter's pool model
             ref = s.quote_amount * 1e9 / s.token_amount if s.chain == "solana" and s.token_amount else None
             ok, why = await adapter.pre_trade_check(s.token, size, ref_price=ref)
@@ -123,6 +160,14 @@ class Bot:
             fill_mc = adapter.fill_market_cap(s.token, fill)
             if fill_mc:
                 timing["fill_mc_usd"] = round(fill_mc)
+            if held is not None:                                     # profile add: merge into our position
+                self._merge_add(held, fill, usd, timing)
+                self.store.log_signal(s, "bought", f"add #{held.timing['adds']} ({why})")
+                log.info("ADD %s (%s): +%.4f SOL for his add, position now %.4f SOL / %d raw, $%.0f of $%.0f cap, "
+                         "avg entry %.3g SOL/raw [%s]", s.token, prof.name, fill.quote_amount, held.cost,
+                         held.token_amount, held.timing["bought_usd"], prof.max_usd_per_token,
+                         held.cost / int(held.timing.get("initial_amount") or held.token_amount), fill.model or "-")
+                return
             p = Position(None, s.chain, s.token, s.leader, fill.token_amount, fill.quote_amount,
                          time.time(), fill.signature, self.paper, timing=timing)
             p.id = self.store.open_position(p)
@@ -140,6 +185,26 @@ class Bot:
                      why, fill.model or "-")
         finally:
             self.in_flight.discard(key)
+
+    def _merge_add(self, p: Position, fill, usd: float, timing: dict):
+        """Weighted merge of an add-on fill into an open profile position: amount, cost, bought_usd, the stop
+        reference and the trailing peak grow by the add (so the add itself never trips a stop); the average
+        entry (cost / all tokens) rises with it, and so do the ladder levels. Adds are listed in timing["add_ts"]."""
+        p.token_amount += fill.token_amount
+        p.cost += fill.quote_amount
+        if "initial_amount" in p.timing:                             # partial sells happened: keep `held` consistent
+            p.timing["initial_amount"] = int(p.timing["initial_amount"]) + fill.token_amount
+        p.timing["bought_usd"] = round(float(p.timing.get("bought_usd") or p.timing.get("our_usd") or 0) + usd, 2)
+        p.timing["adds"] = int(p.timing.get("adds", 0)) + 1
+        p.timing.setdefault("add_ts", []).append(round(timing.get("filled_at") or time.time(), 3))
+        p.timing.setdefault("add_fills", []).append({"sol": fill.quote_amount, "raw": fill.token_amount,
+                                                     "usd": round(usd, 2), "model": fill.model})
+        if p.ref_value is not None:
+            p.ref_value += fill.quote_amount
+            self.store.set_ref(p)
+        if p.peak_value is not None:
+            p.peak_value += fill.quote_amount
+        self.store.update_position(p)
 
     async def consume(self):
         while True:

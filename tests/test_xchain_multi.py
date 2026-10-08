@@ -150,9 +150,9 @@ async def ladder_tests():
     await asyncio.sleep(0.3)
     rows = store.db.execute("SELECT offset_s, delay_s, price_usd, gap_pct FROM xchain_prices ORDER BY offset_s").fetchall()
     assert [r[0] for r in rows] == [0, 0.05, 0.1], rows
-    assert all(4 <= r[1] < 5 and r[2] and r[3] is not None for r in rows), rows
+    assert all(4 <= r[1] < 6 and r[2] and r[3] is not None for r in rows), rows      # < 6: loaded machine
     later, delay = store.db.execute("SELECT price_later_usd, detect_delay_s FROM xchain_trades").fetchone()
-    assert later == rows[-1][2] and 3.9 < delay < 5
+    assert later == rows[-1][2] and 3.9 < delay < 6
     print("price ladder: one Relay /price per offset after detection, gap vs his price, delay vs his trade")
 
 

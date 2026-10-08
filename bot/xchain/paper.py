@@ -70,6 +70,7 @@ class XchainPaperTrader:
             raise ValueError("xchain trading is paper-only (no execution exists): set paper: true")
         self.normal_exits = normal_exits_from(global_exits, float(cfg.get("max_hold_h", 48)))
         self.mark_normal_s = float(cfg.get("normal_mark_interval_s", 30))
+        self.sol_usd = float(cfg.get("sol_usd_for_limits", 200))   # converts a profile's Solana PnL for daily_loss_usd
         self.store = store
         self.leaders = set(leaders)                                          # Solana leader wallets
         self.profiles = dict(profiles or {})                                 # leader -> Profile (bot/profiles.py)
@@ -173,18 +174,24 @@ class XchainPaperTrader:
             if prof is not None:                                 # own cap per token (incl. his adds) + minimum
                 own, prof_why = prof.size_usd(t.usd, p.timing["bought_usd"] if p else 0.0)
                 size = min(size, own)
-            n_leader = sum(k[2] == leader for k in list(self.positions) + list(self._opening))
+            # the global limits count NORMAL positions only; a profile has its own (max_open_tokens over
+            # Solana + xchain via the store, daily_loss_usd)
+            normal = [k for k, q in self.positions.items() if not q.timing.get("profile")] + [
+                k for k in self._opening if self.profiles.get(k[2]) is None]
+            n_leader = sum(k[2] == leader for k in normal)
             why = None
             if age > self.max_age:
                 why = f"stale: detected {age:.0f}s after his trade"
             elif os.path.exists(self.kill):
                 why = "kill switch file present"
-            elif p is None and len(self.positions) + len(self._opening) >= self.max_open:
+            elif prof is None and p is None and len(normal) >= self.max_open:
                 why = f"max open xchain positions ({self.max_open})"
-            elif p is None and n_leader >= self.max_per_leader:
+            elif prof is None and p is None and n_leader >= self.max_per_leader:
                 why = f"max open xchain positions per leader ({self.max_per_leader})"
             elif prof_why:
                 why = prof_why
+            elif prof is not None and p is None:
+                why = self._profile_can_open(prof)
             elif size < (prof.min_usd if prof else self.min_usd):
                 why = (f"cap ${self.cap:,.0f}/token reached" if target >= self.min_usd or prof
                        else f"our size ${target:,.2f} < ${self.min_usd:,.0f}")
@@ -239,6 +246,15 @@ class XchainPaperTrader:
             self._fill(p, "buy", kind, 1.0, now, q, cost, q.out_raw, our_price,
                        {"his_ref": t.request_id, "his_ts": t.deposit_ts, "his_usd": t.usd,
                         "his_price_usd": t.price_usd, "detected_at": detected_at})
+
+    def _profile_can_open(self, prof) -> str | None:
+        n = self.store.profile_open_count(prof.name) + sum(k[2] == prof.leader for k in self._opening)
+        if n >= prof.max_open_tokens:
+            return f"profile {prof.name}: max open tokens ({prof.max_open_tokens})"
+        lost = self.store.profile_pnl_today_usd(prof.name, self.sol_usd)
+        if lost <= -prof.daily_loss_usd:
+            return f"profile {prof.name}: daily loss limit ${prof.daily_loss_usd:,.0f} hit (${lost:,.0f})"
+        return None
 
     # ---------- exits ----------
     async def _mirror_sell(self, chain: str, token: str, leader: str, evm: str, sold_raw: int,
@@ -357,6 +373,19 @@ class XchainPaperTrader:
                              "held %.1fh", why.upper(), p.chain, p.timing.get("symbol"), total, p.cost, 100 * ret,
                              100 * stop_ret, (now - p.opened_at) / 3600)
                     self._spawn(self._stop(p, time.time(), why))
+            elif exits and exits.get("mode") == "mirror_ladder":  # mirror + own ladder + safety stop on the rest
+                units = rem / 10 ** int(p.timing["decimals"])
+                price, avg = (value_rem / units if units else 0.0), (basis / units if units else 0.0)
+                fired = list(p.timing.get("ladder_fired") or [])
+                due = [lv for lv in sorted(float(x) for x in exits.get("ladder_levels") or [])
+                       if lv not in fired and avg and price >= lv * avg]
+                if due:
+                    self._spawn(self._ladder(p, due, float(exits.get("ladder_pct", 0.25)), price, avg))
+                elif value_rem <= (1 - float(exits["stop_loss"])) * basis:
+                    log.warning("xchain SAFETY STOP %s %s (%s): remaining worth $%.2f vs cost $%.2f (%+.0f%%)",
+                                p.chain, p.timing.get("symbol"), p.timing.get("profile"), value_rem, basis,
+                                100 * (value_rem / basis - 1))
+                    self._spawn(self._stop(p, time.time()))
             elif exits and exits.get("mode") == "trail":         # leader profile: we exit ourselves
                 peak = max(p.timing.get("peak_value", basis), value_rem)
                 if peak != p.timing.get("peak_value"):
@@ -379,6 +408,25 @@ class XchainPaperTrader:
                             f" ({p.timing['profile']})" if p.timing.get("profile") else "",
                             value_rem, basis, 100 * (value_rem / basis - 1))
                 self._spawn(self._stop(p, time.time()))
+
+    async def _ladder(self, p: Position, levels: list[float], pct: float, price: float, avg: float):
+        """Sell pct of what we still hold at each due ladder level, once per level (timing["ladder_fired"])."""
+        async with self.locks[(p.chain, p.token, p.leader)]:
+            for level in levels:
+                if (p.chain, p.token, p.leader) not in self.positions:
+                    return
+                fired = list(p.timing.get("ladder_fired") or [])
+                if level in fired:
+                    continue
+                rem = int(p.timing["remaining"])
+                log.info("xchain LADDER %s %s (%s): %gx our average entry ($%.4g vs $%.4g) -> selling %.0f%% of the "
+                         "holding", p.chain, p.timing.get("symbol"), p.timing.get("profile"), level, price, avg, 100 * pct)
+                if await self._sell(p, max(1, int(rem * pct)), f"ladder_{level:g}x", pct, {}):
+                    p.timing["ladder_fired"] = fired + [level]
+                    if p.status == "open":
+                        self.store.update_position(p)
+                    else:
+                        self.store.close_position(p)
 
     async def _stop(self, p: Position, triggered_at: float, reason: str = "safety_stop"):
         async with self.locks[(p.chain, p.token, p.leader)]:
@@ -562,9 +610,14 @@ class XchainPaperTrader:
         for p in self.positions.values():                         # first marks ~10 s after start
             p.last_mark_at = time.time() - self._mark_interval(p) + 10
         for leader, prof in self.profiles.items():
-            log.info("xchain profile %s for %s: %s, marks every %.0fs", prof.name, leader[:8],
+            log.info("xchain profile %s for %s: %s, cap $%.0f/token incl. adds, max %d open tokens, daily loss $%.0f, "
+                     "marks every %.0fs", prof.name, leader[:8],
+                     f"his sells mirrored pro rata + ladder {100 * prof.ladder_pct:.0f}% at "
+                     f"{'/'.join(f'{x:g}' for x in prof.ladder_levels)}x, safety stop -{100 * prof.stop_loss:.0f}%"
+                     if prof.mode == "mirror_ladder" else
                      f"his sells mirrored pro rata, safety stop -{100 * prof.stop_loss:.0f}%" if prof.mirrors
-                     else "own trail/stop, his sells not followed", prof.mark_interval_s)
+                     else "own trail/stop, his sells not followed", prof.max_usd_per_token, prof.max_open_tokens,
+                     prof.daily_loss_usd, prof.mark_interval_s)
         while True:
             try:
                 await self.logs_once()

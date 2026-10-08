@@ -74,7 +74,7 @@ class PositionManager:
         for p in self.open():
             if p.chain == chain and p.token == token and p.leader == leader and p.status == "open" \
                     and self._exits(p)[5]:
-                if (p.timing.get("exits") or {}).get("mode") == "mirror" and fraction < 0.99:
+                if (p.timing.get("exits") or {}).get("mode") in ("mirror", "mirror_ladder") and fraction < 0.99:
                     await self.partial_sell(p, fraction, "leader_sold")
                 else:
                     await self.close(p, "leader_sold")
@@ -181,8 +181,12 @@ class PositionManager:
             self.store.set_ref(p)        # saved, so a restart keeps the same stop level
         p.peak_value = total if p.peak_value is None else max(p.peak_value, total)
         ret = total / p.cost - 1
-        stop_ret = value / (p.ref_value if self.stop_basis == "entry_price" else p.cost) / held - 1
+        e = p.timing.get("exits") or {}
+        basis = e.get("stop_basis", self.stop_basis)        # profile positions may stop on cost instead of ref
+        stop_ret = value / (p.ref_value if basis == "entry_price" else p.cost) / held - 1
         trailing_on = trail_pct > 0 and p.peak_value / p.cost - 1 >= trail_act
+        if e.get("mode") == "mirror_ladder" and await self._ladder(p, value, e):
+            return                                          # sold a ladder step: re-quote before any stop
         if tp > 0 and ret >= tp:
             await self.close(p, "take_profit", value)
         elif trailing_on and value <= p.peak_value * (1 - trail_pct):
@@ -191,6 +195,30 @@ class PositionManager:
             await self.close(p, "stop_loss", value)
         elif max_hold > 0 and age > max_hold:
             await self.close(p, "max_hold", value)
+
+    async def _ladder(self, p: Position, value: float, e: dict) -> bool:
+        """mirror_ladder profile: at each level x our average entry (cost / all tokens ever held, adds included)
+        sell ladder_pct of what we STILL hold, once per level (timing["ladder_fired"]). True if something sold."""
+        initial = int(p.timing.get("initial_amount") or p.token_amount)
+        avg = p.cost / initial if initial else 0.0
+        price = value / p.token_amount if p.token_amount else 0.0
+        fired, sold = list(p.timing.get("ladder_fired") or []), False
+        for level in sorted(float(x) for x in e.get("ladder_levels") or []):
+            if level in fired or not avg or price < level * avg:
+                continue
+            before = p.token_amount
+            await self.partial_sell(p, float(e.get("ladder_pct", 0.25)), f"ladder_{level:g}x")
+            if p.token_amount == before:                    # sell failed: try again on the next quote
+                break
+            fired.append(level)
+            p.timing["ladder_fired"] = fired
+            self.store.update_position(p)
+            sold = True
+            log.info("LADDER %s: %gx our average entry (%.3g vs %.3g SOL/raw) -> sold %.0f%% of the holding, "
+                     "levels done %s", p.token, level, price, avg, 100 * float(e.get("ladder_pct", 0.25)), fired)
+            if p.status != "open":
+                break
+        return sold
 
     def _switch_confirmed(self, p: Position, total: float, now: float) -> bool:
         """Source-switch guard. Tracks where the quote came from (adapter.quote_source, if it has one). When the

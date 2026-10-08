@@ -217,12 +217,34 @@ class Store:
             out.append(p)
         return out
 
+    @staticmethod
+    def _day_start() -> float:
+        return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
     def realized_pnl_today(self, chain: str, paper: bool) -> float:
-        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        """Today's realized PnL of the NORMAL positions on `chain` (profile positions have their own limit)."""
         r = self.db.execute("SELECT COALESCE(SUM(exit_value-cost),0) FROM positions WHERE chain=? "
-                            "AND paper=? AND status='closed' AND closed_at>=?", (chain, int(paper), start))
+                            "AND paper=? AND status='closed' AND closed_at>=? AND NOT (timing LIKE '%\"profile\"%')",
+                            (chain, int(paper), self._day_start()))
         return r.fetchone()[0]
 
+    def profile_pnl_today_usd(self, profile: str, sol_usd: float) -> float:
+        """Today's realized PnL of a leader profile over all chains, in USD (Solana PnL x sol_usd)."""
+        total = 0.0
+        for chain, pnl, timing in self.db.execute(
+                "SELECT chain, exit_value - cost, timing FROM positions WHERE status='closed' AND closed_at>=? "
+                "AND timing LIKE ?", (self._day_start(), f'%"profile": "{profile}"%')):
+            if json.loads(timing or "{}").get("profile") == profile:
+                total += pnl * (sol_usd if chain == "solana" else 1.0)
+        return total
+
+    def profile_open_count(self, profile: str) -> int:
+        """Open positions of a leader profile, all chains (Solana + xchain managers share this count)."""
+        return sum(json.loads(t or "{}").get("profile") == profile for (t,) in self.db.execute(
+            "SELECT timing FROM positions WHERE status!='closed' AND timing LIKE ?", (f'%"profile": "{profile}"%',)))
+
     def last_exit(self, chain: str, token: str) -> float | None:
-        r = self.db.execute("SELECT MAX(closed_at) FROM positions WHERE chain=? AND token=?", (chain, token))
+        """Last close of a NORMAL position in `token` (re-entry cooldown; profile positions have no lock)."""
+        r = self.db.execute("SELECT MAX(closed_at) FROM positions WHERE chain=? AND token=? "
+                            "AND NOT (timing LIKE '%\"profile\"%')", (chain, token))
         return r.fetchone()[0]
