@@ -65,9 +65,10 @@ def normal_exits_from(exits_cfg: dict | None, max_hold_h: float = 48.0) -> dict 
 
 class XchainPaperTrader:
     def __init__(self, cfg: dict, store, paper: bool, leaders, kill_switch_file: str = "STOP", profiles=None,
-                 global_exits: dict | None = None):
+                 global_exits: dict | None = None, watch=None):
         if not paper:
             raise ValueError("xchain trading is paper-only (no execution exists): set paper: true")
+        self.watch = set(watch or ())                                        # status watch: no positions
         self.normal_exits = normal_exits_from(global_exits, float(cfg.get("max_hold_h", 48)))
         self.mark_normal_s = float(cfg.get("normal_mark_interval_s", 30))
         self.sol_usd = float(cfg.get("sol_usd_for_limits", 200))   # converts a profile's Solana PnL for daily_loss_usd
@@ -112,6 +113,9 @@ class XchainPaperTrader:
             return
         evm = evm.lower()
         if t.side == "buy":
+            if leader in self.watch:
+                self._skip(t, leader, "watch leader")
+                return
             self._spawn(self._buy(t, leader, evm, detected_at))
         elif t.side == "sell":
             # decided by the exits stored in OUR position, so positions opened before a profile existed

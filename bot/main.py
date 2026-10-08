@@ -41,6 +41,17 @@ class Bot:
         self.pm = PositionManager(cfg["exits"], self.adapters, self.store)
         self.risk = RiskManager(cfg["risk"], self.store, self.paper)
         self.profiles = load_profiles(cfg, self.paper)          # per-leader exits + sizing (paper only)
+        # leader status (chains.<chain>.leader_status: {wallet: active|watch}): a WATCH leader is streamed and his
+        # signals, entry gaps (ticks) and post-signal price paths are recorded, but he opens no positions anywhere
+        self.watch: set[str] = set()
+        for name, c in cfg["chains"].items():
+            for leader, status in (c.get("leader_status") or {}).items():
+                if status not in ("active", "watch"):
+                    raise ValueError(f"chains.{name}.leader_status.{leader}: unknown status {status!r}")
+                if status == "watch":
+                    self.watch.add(leader)
+        if self.watch:
+            log.info("watch-only leaders (signals recorded, no positions): %s", ", ".join(w[:8] for w in sorted(self.watch)))
         self.in_flight: set[tuple[str, str, str]] = set()        # (chain, token, profile name or "")
         if "solana" in self.adapters:                             # profile leaders: min_usd instead of min_leader_buy_sol
             self.adapters["solana"].min_buy_exempt = set(self.profiles)
@@ -62,7 +73,8 @@ class Bot:
                 if self.paper:
                     self.xchain.trader = XchainPaperTrader(pt, self.store, self.paper, self.xchain.sol_leaders,
                                                            cfg["risk"].get("kill_switch_file", "STOP"),
-                                                           profiles=self.profiles, global_exits=cfg.get("exits") or {})
+                                                           profiles=self.profiles, global_exits=cfg.get("exits") or {},
+                                                           watch=self.watch)
                 else:
                     log.error("xchain.paper_trading ignored: it is paper-only and this bot runs with paper: false")
 
@@ -94,6 +106,9 @@ class Bot:
         age = time.time() - s.block_time if s.block_time else 0
         if age > float(ccfg.get("max_signal_age_s", 5)):
             self._skip(s, f"stale {age:.1f}s")
+            return
+        if s.leader in self.watch:
+            self._skip(s, "watch leader")                  # recorded + price path observed, never a position
             return
         prof = self.profiles.get(s.leader) if s.chain == "solana" else None
         held = self._profile_position(s.chain, s.token, s.leader) if prof is not None else None
