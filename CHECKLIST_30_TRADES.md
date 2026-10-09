@@ -120,3 +120,9 @@ Profiles since Oct 8: profile positions are keyed by (leader, token), separate f
 Tick retention since Oct 8: ticks_after_close_h 24 (was 6 h); ticks older than 7 days -> 1-minute bars with
   python -m scripts.compact_ticks (bot STOPPED). whatif_ticksv2 replays old positions on the bars (minute
   precision) and requires the tick series to start within 30 s of our fill (258 and 268 are "not replayable").
+
+SCANNER CALIBRATION (registered 2026-10-09, before results): the wallet scanner
+becomes the screening gate for new leaders only if the copy-sim (check 12) has
+Spearman rho >= 0.54 vs our paper PnL over the 14 calibration leaders AND it
+marks Leader-E PAPER CANDIDATE while rejecting Leader-D and Leader-AI.
+Otherwise it stays informational and new leaders are judged in paper only.
