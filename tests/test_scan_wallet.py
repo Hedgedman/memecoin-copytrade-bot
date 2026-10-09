@@ -1,8 +1,9 @@
 """Wallet screener, offline parts: python -m tests.test_scan_wallet
 
-Average-cost token book (closed / open / bought-before-the-window), venue classification and the SOL/USD lookup.
+Average-cost token book (closed / open / bought-before-the-window), venue classification, the SOL/USD lookup, and
+the copy simulation (check 12) + check 8 numbers on synthetic 1-minute candles.
 No network: fetching, GeckoTerminal and the checks that need them are exercised by running the script."""
-from scripts.scan_wallet import tokens_book, usd_at, venue_of
+from scripts.scan_wallet import copy_sim, path_numbers, tokens_book, usd_at, venue_of
 
 L = 1_000_000_000
 
@@ -37,6 +38,36 @@ def test_misc():
     print("venues + SOL/USD lookup ok")
 
 
+def c(ts, o, h, lo, cl, v=1.0):
+    return [ts, o, h, lo, cl, v]
+
+
+def test_copy_sim():
+    t = 600_000 + 17                                     # his buy at second 17 of minute 600000
+    base = {600_000: c(600_000, 1.0, 1.1, 0.9, 1.0)}
+    # entry = open of the NEXT candle (1.2); TP at 1.56 hit in the minute after
+    tp = base | {600_060: c(600_060, 1.2, 1.3, 1.15, 1.25), 600_120: c(600_120, 1.25, 1.6, 1.2, 1.5)}
+    r = copy_sim(tp, t)
+    assert r["out"] == "tp" and abs(r["ret"] - 0.28) < 1e-9 and r["entry"] == 1.2 and r["entry_ts"] == 600_060
+    # both levels in one candle -> stop first
+    both = base | {600_060: c(600_060, 1.0, 1.4, 0.7, 1.0)}
+    assert copy_sim(both, t)["out"] == "stop" and abs(copy_sim(both, t)["ret"] + 0.22) < 1e-9
+    # gap below the stop: filled at the open (worse than -20%)
+    gap = base | {600_060: c(600_060, 1.0, 1.05, 0.95, 1.0), 600_180: c(600_180, 0.5, 0.55, 0.4, 0.45)}
+    r = copy_sim(gap, t)
+    assert r["out"] == "stop(gap)" and abs(r["ret"] - (0.5 - 1 - 0.02)) < 1e-9
+    # a minute without trades: the next existing candle is the entry; nothing hit -> last close, open
+    quiet = base | {600_180: c(600_180, 2.0, 2.1, 1.9, 2.2)}
+    r = copy_sim(quiet, t)
+    assert r["entry"] == 2.0 and r["out"] == "open" and abs(r["ret"] - 0.08) < 1e-9
+    assert copy_sim(base, t) is None                     # no candle after his minute
+    # check 8 numbers vs his fill 0.8: +5 s = close of his minute, drift = +5 min close vs our entry
+    pn = path_numbers(tp | {600_300: c(600_300, 1.5, 1.5, 1.4, 1.44)}, t, 0.8)
+    assert abs(pn["p5s"] - 0.25) < 1e-9 and abs(pn["p60"] - (1.25 / 0.8 - 1)) < 1e-9
+    assert abs(pn["p5m"] - 0.8) < 1e-9 and pn["up20"] and abs(pn["drift"] - 0.2) < 1e-9
+    print("copy simulation: next-candle entry, TP / stop (stop first), gaps, quiet minutes, check 8 numbers ok")
+
+
 if __name__ == "__main__":
-    test_book(); test_misc()
+    test_book(); test_misc(); test_copy_sim()
     print("ALL PASSED")

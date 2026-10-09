@@ -12,9 +12,14 @@ Data
 - Per token: average-cost accounting inside the window. Tokens he sold more of than he bought in the window (bought
   before it) are left out of PnL (counted as `pre_window`). Closed = what he still holds <= 1% of what he bought.
 - Price paths after his buys: GeckoTerminal 1-minute candles (cached in backtests/wallet_scans/gt/, 1 call / 6.5 s),
-  on the pool of his own swap (pump.fun curve / PumpSwap pool from the tx; other venues: GT's top SOL pool), for
-  a fixed random sample of up to --gt-max tokens (first buy each). 1-minute resolution: "+5 s" is the close of
-  the minute of his buy (includes his own impact), "+60 s" the next minute's close, "+5 min" the close 5 minutes on.
+  one ~16 h forward window per token from his FIRST buy (adds ignored), on the pool of his own swap (pump.fun curve /
+  PumpSwap pool from the tx; other venues: GT's top SOL pool; a graduating curve continues on its PumpSwap pool).
+  --sim-max N samples N tokens (default 0 = all).
+  Check 12 (copy simulation, the main verdict): our entry = the OPEN of the first candle after the minute of his
+  buy (a conservative proxy for "his buy + 5 s" with 1-minute data), then TP +30% / stop -20% on our entry,
+  stop first if both in one candle, 2% round trip; no exit in the window = last close.
+  Check 8 (info): price vs his fill at ~+5 s (close of his buy minute), +60 s, +5 min, share of buys > +20% within
+  60 s (1-minute highs: include his own buy impact), and the post-entry drift (our copy entry -> +5 min close).
 - Non-trading income: SOL / WSOL / USDC he receives in txs that are not his swaps, split into fee shares
   (inspect_wallet.classify c_fee_share), program claims (creator fees etc.: a trading program is involved) and
   plain transfers in. Check 10 uses fee shares + program claims; transfers in are shown separately.
@@ -22,9 +27,11 @@ Data
   >= 1000 signatures within 6 h is called exchange-like (a heuristic, not a label).
 - If the address is one of our leaders: our own paper scorecard for him (scripts.leader_report.collect).
 
-Output: a table per wallet (PASS / FAIL / FLAG / UNKNOWN / INFO with the number), a verdict (REJECT if any FAIL,
-else PAPER CANDIDATE with the flags and unknowns listed), a ranking for several wallets, and
-backtests/wallet_scans/<address>.json.
+Output: a table per wallet (PASS / FAIL / FLAG / UNKNOWN / INFO with the number), a verdict: REJECT if check 2
+(realized PnL), 3 (w/o best 3) or 12 (copy simulation) fails or check 10 (non-trading income) flags, else PAPER
+CANDIDATE (other FAILs and UNKNOWNs listed, not deciding). Checks 4 (win rate) and 8 (copyability) are INFO since
+the Oct 9 2026 calibration against our paper leaders. A ranking for several wallets (copy simulation first).
+Saved to backtests/wallet_scans/<address>.json.
 """
 from __future__ import annotations
 
@@ -323,13 +330,77 @@ def check(status, value, rule):
     return {"status": status, "value": value, "rule": rule}
 
 
-def copyability(gk: Gecko, book: dict, infos: dict, gt_max: int, seed: str) -> dict:
-    """Price after his FIRST buy of a sample of tokens, from 1-minute candles (SOL per UI token)."""
+def canonical_pumpswap_pool(mint: str) -> str:
+    """The PumpSwap pool a pump.fun curve migrates into (index 0, creator = pump's pool-authority PDA)."""
+    from solders.pubkey import Pubkey
+    m = Pubkey.from_string(mint)
+    auth, _ = Pubkey.find_program_address([b"pool-authority", bytes(m)],
+                                          Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"))
+    pool, _ = Pubkey.find_program_address([b"pool", (0).to_bytes(2, "little"), bytes(auth), bytes(m), bytes(Pubkey.from_string(WSOL))],
+                                          Pubkey.from_string("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"))
+    return str(pool)
+
+
+SIM_TP, SIM_SL, SIM_FEE = 0.30, 0.20, 0.02
+
+
+def copy_sim(candles: dict[int, list], t_buy: float, tp: float = SIM_TP, sl: float = SIM_SL, fee: float = SIM_FEE):
+    """Check 12: we copy his buy. candles = {minute open ts: [ts, o, h, l, c, v]} (one price unit).
+    Entry: the OPEN of the first candle after the minute of his buy (conservative proxy for 'his buy + 5 s' with
+    1-minute data; a minute without trades has no candle, the next one counts). Exit: TP +tp / stop -sl on our entry,
+    checked per candle from the entry candle on; both in one candle -> stop first; a candle that opens beyond a level
+    fills at its open (gap). No exit within the data -> last close, marked open. -> dict or None (no entry candle)."""
+    t0 = int(t_buy) // 60 * 60
+    later = sorted(k for k in candles if k > t0)
+    if not later:
+        return None
+    e_ts = later[0]
+    entry = float(candles[e_ts][1])
+    if entry <= 0:
+        return None
+    up, down = entry * (1 + tp), entry * (1 - sl)
+    for k in later:
+        _, o, h, lo, c, _v = (float(x) for x in candles[k])
+        if o <= down:
+            return dict(ret=o / entry - 1 - fee, out="stop(gap)", entry_ts=e_ts, exit_ts=k, entry=entry)
+        if o >= up:
+            return dict(ret=o / entry - 1 - fee, out="tp(gap)", entry_ts=e_ts, exit_ts=k, entry=entry)
+        if lo <= down:
+            return dict(ret=-sl - fee, out="stop", entry_ts=e_ts, exit_ts=k, entry=entry)
+        if h >= up:
+            return dict(ret=tp - fee, out="tp", entry_ts=e_ts, exit_ts=k, entry=entry)
+    last = later[-1]
+    return dict(ret=float(candles[last][4]) / entry - 1 - fee, out="open", entry_ts=e_ts, exit_ts=last, entry=entry)
+
+
+def path_numbers(candles: dict[int, list], t_buy: float, his: float) -> dict:
+    """Check 8 numbers: price vs his fill at ~+5 s (close of his buy minute), +60 s, +5 min; > +20% within 60 s
+    (high of his minute and the next); post-entry drift = close at +5 min vs our copy entry (next candle's open)."""
+    t0 = int(t_buy) // 60 * 60
+
+    def close_at(k):
+        ks = [x for x in candles if t0 <= x <= t0 + k * 60]
+        return float(candles[max(ks)][4]) if ks else None
+    hi60 = [float(candles[x][2]) for x in candles if t0 <= x <= t0 + 60]
+    later = sorted(k for k in candles if k > t0)
+    entry = float(candles[later[0]][1]) if later else None
+    c0, c1, c5 = close_at(0), close_at(1), close_at(5)
+    return dict(p5s=None if c0 is None else c0 / his - 1, p60=None if c1 is None else c1 / his - 1,
+                p5m=None if c5 is None else c5 / his - 1, up20=bool(hi60) and max(hi60) / his - 1 > 0.20,
+                drift=None if not entry or c5 is None or later[0] > t0 + 300 else c5 / entry - 1)
+
+
+def price_paths(gk: Gecko, book: dict, infos: dict, sim_max: int, seed: str) -> dict:
+    """1-minute candles after his FIRST buy of each token (adds ignored), forward window of ~16 h from his buy on
+    the pool of his swap (curve / PumpSwap from the tx, else GeckoTerminal's top SOL pool; a curve that graduates
+    continues on its canonical PumpSwap pool). Feeds check 8 (numbers) and check 12 (copy simulation)."""
     cands = [m for m, b in book.items() if b["buys"] and infos.get(m)]
-    rnd = random.Random(seed)
-    rnd.shuffle(cands)
+    cands.sort(key=lambda m: book[m]["first_buy"])
+    if sim_max and len(cands) > sim_max:
+        rnd = random.Random(seed)
+        cands = sorted(rnd.sample(cands, sim_max), key=lambda m: book[m]["first_buy"])
     rows = []
-    for m in cands[:gt_max]:
+    for m in cands:
         s = book[m]["buys"][0]
         dec = infos[m]["decimals"]
         his = s["sol"] / (s["raw"] / 10 ** dec)
@@ -341,21 +412,28 @@ def copyability(gk: Gecko, book: dict, infos: dict, gt_max: int, seed: str) -> d
                 if r["base_token"]["data"]["id"] == f"solana_{m}" and r["quote_token"]["data"]["id"] == f"solana_{WSOL}":
                     pool = p["attributes"]["address"]; break
         if not pool:
-            continue
+            rows.append(dict(mint=m, venue=s["venue"], status="no pool")); continue
         t0 = int(s["ts"]) // 60 * 60
-        d = gk.get(f"{NET}/pools/{pool}/ohlcv/minute?aggregate=1&before_timestamp={t0 + 361}&limit=10&currency=token&token={m}",
-                   f"ohlcv_{pool}_{t0}.json")
-        c = {int(r[0]): r for r in ((d or {}).get("data") or {}).get("attributes", {}).get("ohlcv_list") or []}
-        if t0 not in c:
-            continue
-        def close_at(k):            # last candle at or before t0 + k*60 (no trade in a minute = unchanged price)
-            ks = [x for x in c if t0 <= x <= t0 + k * 60]
-            return c[max(ks)][4] if ks else None
-        hi60 = max(c[x][2] for x in c if t0 <= x <= t0 + 60)
-        rows.append(dict(mint=m, venue=s["venue"], his=his, p5s=close_at(0) / his - 1,
-                         p60=(close_at(1) or close_at(0)) / his - 1, p5m=(close_at(5) or close_at(0)) / his - 1,
-                         up20=hi60 / his - 1 > 0.20))
-    return {"n": len(rows), "sampled": min(gt_max, len(cands)), "tokens_with_buys": len(cands), "rows": rows}
+        before = t0 + 1000 * 60
+        pools = [pool] + ([canonical_pumpswap_pool(m)] if s["venue"] == "curve" else [])
+        candles = {}
+        for i, pl in enumerate(pools):
+            if i and candles and copy_sim(candles, s["ts"]) and copy_sim(candles, s["ts"])["out"] != "open":
+                break                       # resolved on the curve: no need for the PumpSwap pool
+            d = gk.get(f"{NET}/pools/{pl}/ohlcv/minute?aggregate=1&before_timestamp={before}&limit=1000"
+                       f"&currency=token&token={m}", f"ohlcv1000_{pl}_{t0}.json")
+            for r in ((d or {}).get("data") or {}).get("attributes", {}).get("ohlcv_list") or []:
+                k = int(r[0])
+                if k >= t0 and (k not in candles or float(r[5]) > float(candles[k][5])):
+                    candles[k] = r
+        if t0 not in candles and not any(k > t0 for k in candles):
+            rows.append(dict(mint=m, venue=s["venue"], status="no candles")); continue
+        row = dict(mint=m, venue=s["venue"], status="ok", his=his, ts=s["ts"], sol=s["sol"])
+        if t0 in candles:
+            row.update(path_numbers(candles, s["ts"], his))
+        row["sim"] = copy_sim(candles, s["ts"])
+        rows.append(row)
+    return {"rows": rows, "tokens_with_buys": len([m for m, b in book.items() if b["buys"]]), "simulated": len(cands)}
 
 
 def our_paper(addr: str) -> dict | None:
@@ -433,9 +511,12 @@ def scan(addr: str, args, rpc: Rpc, gk: Gecko, daily: dict) -> dict:
     vm = defaultdict(int)
     for s in buys:
         vm[s["venue"]] += 1
-    cp = copyability(gk, book, infos, args.gt_max, addr)
-    r = cp["rows"]
+    cp = price_paths(gk, book, infos, args.sim_max, addr)
+    r = [x for x in cp["rows"] if x["status"] == "ok" and x.get("p5s") is not None]
     up20 = sum(x["up20"] for x in r) / len(r) if r else None
+    sims = [x["sim"] for x in cp["rows"] if x["status"] == "ok" and x.get("sim")]
+    sim_rets = sorted((x["ret"] for x in sims), reverse=True)
+    sim_total, sim_wo3 = sum(sim_rets), sum(sim_rets[3:])
     quick = [m for m, b in book.items() if b["buys"] and not b["pre_window"] and any(
         s2["ts"] - b["first_buy"] <= 300 and s2["raw"] and b["cost"] and
         (s2["sol"] / s2["raw"]) / (b["cost"] / b["bought"]) > 1.2 for s2 in b["sells"])]
@@ -444,18 +525,22 @@ def scan(addr: str, args, rpc: Rpc, gk: Gecko, daily: dict) -> dict:
     nti = inc["fee_share"] + inc["program_claims"]
     fund = funding(rpc, addr, fetch_oldest(rpc, addr))
     checks = {}
+    need_span = min(21, args.days)
     checks["1 activity"] = check(
-        "PASS" if span >= min(30, args.days) - 1 and len(book) >= 50 else "FAIL",
-        f"{span:.1f} d span, {days_active} active days, {len(book)} tokens{' (TRUNCATED fetch)' if truncated else ''}",
-        f">= {min(30, args.days) - 1:g} d span and >= 50 tokens")
+        "PASS" if span >= need_span and len(book) >= 50 else "FAIL",
+        f"{span:.1f} d span, {days_active} active days, {len(book)} tokens, wallet age "
+        f"{fund['wallet_age_days'] or 0:.0f} d{' (TRUNCATED fetch)' if truncated else ''}",
+        f">= {need_span:g} d span and >= 50 tokens (wallet age shown, not a fail)")
     checks["2 realized PnL"] = check("UNKNOWN" if not pnl else "PASS" if realized > 0 else "FAIL",
                                      f"{realized:+.2f} SOL on {len(pnl)} closed tokens; unrealized {unreal:+.2f} SOL on "
                                      f"{priced}/{len(open_)} open tokens (last price); {sum(b['pre_window'] for b in book.values())} "
                                      f"tokens bought before the window left out", "> 0")
     checks["3 w/o best 3"] = check("UNKNOWN" if len(pnl) < 4 else "PASS" if wo3 > 0 else "FAIL",
                                    f"{wo3:+.2f} SOL (best 3: " + ", ".join(f"{m[:6]} {p:+.2f}" for p, m in pnl[:3]) + ")", "> 0")
-    checks["4 win rate"] = check("UNKNOWN" if wr is None else "FLAG" if wr > 0.85 else "PASS" if 0.40 <= wr <= 0.75 else "FAIL",
-                                 None if wr is None else f"{wr:.0%} ({wins}/{len(pnl)} tokens)", "40-75% (flag > 85%)")
+    checks["4 win rate"] = check("INFO", None if wr is None else f"{wr:.0%} ({wins}/{len(pnl)} tokens)"
+                                 + (" - outside 40-75%" if wr is not None and not 0.40 <= wr <= 0.75 else "")
+                                 + (" - above 85%" if wr is not None and wr > 0.85 else ""),
+                                 "info (was: 40-75%, flag > 85%; demoted after calibration)")
     mh = med(holds)
     checks["5 holding time"] = check("UNKNOWN" if mh is None else "FAIL" if mh < 60 else "PASS",
                                      None if mh is None else f"median {mh / 60:.1f} min ({len(holds)} closed tokens)", ">= 60 s")
@@ -468,10 +553,11 @@ def scan(addr: str, args, rpc: Rpc, gk: Gecko, daily: dict) -> dict:
                                           f"{vm['curve'] / tot:.0%}, PumpSwap {vm['pumpswap'] / tot:.0%}, other {vm['other'] / tot:.0%}",
                                           "info")
     checks["8 copyability"] = check(
-        "UNKNOWN" if up20 is None else "FAIL" if up20 > 0.40 else "PASS",
-        None if not r else f"after his buy: +5 s~ {med(x['p5s'] for x in r):+.1%}, +60 s {med(x['p60'] for x in r):+.1%}, "
-        f"+5 min {med(x['p5m'] for x in r):+.1%}; > +20% within 60 s: {up20:.0%} ({len(r)} of {cp['sampled']} sampled tokens)",
-        "<= 40% of buys > +20% within 60 s")
+        "INFO",
+        None if not r else f"vs his fill: +5 s~ {med(x['p5s'] for x in r):+.1%}, +60 s {med(x['p60'] for x in r):+.1%}, "
+        f"+5 min {med(x['p5m'] for x in r):+.1%}; > +20% within 60 s: {up20:.0%}; post-entry drift (our copy entry -> "
+        f"+5 min): {med(x.get('drift') for x in r):+.1%} ({len(r)} tokens)",
+        "info (was: FAIL if > 40% of buys > +20% within 60 s; 1-min highs include his own buy impact)")
     checks["9 sells into own pump"] = check("UNKNOWN" if pump_share is None else "FLAG" if pump_share > 0.5 else "PASS",
                                             None if pump_share is None else f"{pump_share:.0%} ({len(quick)}/{len(sold_any)} tokens)",
                                             "flag > 50% (sold within 5 min at > +20%)")
@@ -486,13 +572,32 @@ def scan(addr: str, args, rpc: Rpc, gk: Gecko, daily: dict) -> dict:
     checks["11 funding"] = check("INFO", f"wallet age {fund['wallet_age_days'] or 0:.0f} d; first SOL "
                                  f"{fund['first_sol'] or 0:.3f} from {(fund['funder'] or '?')[:8]} ({fund['funder_kind']})",
                                  "info")
-    fails = [k for k, c in checks.items() if c["status"] == "FAIL"]
-    flags = [k for k, c in checks.items() if c["status"] == "FLAG"]
+    outs = defaultdict(int)
+    for x in sims:
+        outs[x["out"]] += 1
+    checks["12 copy simulation"] = check(
+        "UNKNOWN" if len(sims) < 10 else "PASS" if sim_total > 0 and sim_wo3 > 0 else "FAIL",
+        None if not sims else f"n {len(sims)} of {cp['simulated']} tokens, total {100 * sim_total:+.0f}% (sum of returns), "
+        f"w/o best 3 {100 * sim_wo3:+.0f}%, win rate {sum(x > 0 for x in sim_rets) / len(sims):.0%}, median "
+        f"{100 * med(sim_rets):+.1f}%; exits " + ", ".join(f"{k} {v}" for k, v in sorted(outs.items())),
+        "total > 0 AND w/o best 3 > 0 (entry = next 1-min candle's open after his buy; TP +30% / stop -20%, stop "
+        "first within a candle; 2% round trip)")
+    MAIN = ("2 realized PnL", "3 w/o best 3", "12 copy simulation")
+    fails = [k for k in MAIN if checks[k]["status"] == "FAIL"]
+    flags = [k for k in ("10 non-trading income",) if checks[k]["status"] == "FLAG"]
+    other_fails = [k for k, c in checks.items() if c["status"] == "FAIL" and k not in MAIN]
     unknown = [k for k, c in checks.items() if c["status"] == "UNKNOWN"]
-    verdict = "REJECT" if fails else "PAPER CANDIDATE"
+    verdict = "REJECT" if fails or flags else "PAPER CANDIDATE"
     res = dict(address=addr, scanned_at=time.time(), days=args.days, txs=len(txs), truncated=truncated, swaps=len(swaps),
                tokens=len(book), checks=checks, verdict=verdict, fails=fails, flags=flags, unknown=unknown,
-               ours=our_paper(addr), realized=realized, wo3=wo3, copy_rows=r, income=inc, funding=fund,
+               other_fails=other_fails, sim_total=sim_total, sim_wo3=sim_wo3, sim_n=len(sims),
+               metrics=dict(realized=realized, wo3=wo3, win_rate=wr, hold_s=mh, buy_sol=mb, entry_mc=med(mcs),
+                            p5s=med(x["p5s"] for x in r), p60=med(x["p60"] for x in r), p5m=med(x["p5m"] for x in r),
+                            up20=up20, drift=med(x.get("drift") for x in r), sim_total=sim_total, sim_wo3=sim_wo3,
+                            sim_win=sum(x > 0 for x in sim_rets) / len(sims) if sims else None,
+                            sim_median=med(sim_rets), sims=len(sims), tokens=len(book), span_days=span,
+                            nti_pct=pct_nti, pump_share=pump_share),
+               ours=our_paper(addr), realized=realized, wo3=wo3, copy_rows=cp["rows"], income=inc, funding=fund,
                rpc_calls=rpc.calls, gt_calls=gk.calls, seconds=round(time.time() - t0))
     with open(os.path.join(OUT, f"{addr}.json"), "w") as fh:
         json.dump(res, fh, indent=1, default=str)
@@ -509,8 +614,9 @@ def show(res: dict) -> None:
         print(f"\nOur paper results for him (leader_report, flagged out): {o['trades']} closed, {o['wins']} wins, PnL "
               f"{(o['pnl'] or 0):+.2f} SOL, w/o best {(o['wo_best'] or 0):+.2f}, median {(o['med_pct'] or 0):+.1f}%, "
               f"peak median {(o['peak'] or 0):+.0f}%, entry gap median {(o['gap'] or 0):+.1f}%, venues {o['venues']}")
-    why = (f"FAIL: {', '.join(res['fails'])}" if res["fails"] else "no FAIL") + \
+    why = (f"FAIL: {', '.join(res['fails'])}" if res["fails"] else "checks 2, 3, 12 not failed") + \
           (f"; FLAG: {', '.join(res['flags'])}" if res["flags"] else "") + \
+          (f"; other FAIL (not in the verdict): {', '.join(res['other_fails'])}" if res.get("other_fails") else "") + \
           (f"; UNKNOWN: {', '.join(res['unknown'])}" if res["unknown"] else "")
     print(f"\n**Verdict: {res['verdict']}** ({why})")
 
@@ -519,7 +625,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("addresses", nargs="+")
     ap.add_argument("--days", type=float, default=30)
-    ap.add_argument("--gt-max", type=int, default=60, help="tokens sampled for the copyability check (GeckoTerminal)")
+    ap.add_argument("--sim-max", type=int, default=0,
+                    help="tokens (first buys) for checks 8 + 12; 0 = all (1 GeckoTerminal call each, ~6.5 s)")
     ap.add_argument("--max-pages", type=int, default=600, help="getTransactionsForAddress pages (100 txs each)")
     ap.add_argument("--cache-h", type=float, default=12, help="reuse cached transactions younger than this")
     ap.add_argument("--refresh", action="store_true")
@@ -538,13 +645,14 @@ def main():
         show(res)
         results.append(res)
     if len(results) > 1:
-        print("\n### Ranking (verdict, then number of PASS, then realized PnL without the best 3)\n")
-        print("| rank | wallet | verdict | PASS | FAIL | FLAG | realized SOL | w/o best 3 |\n|---|---|---|---|---|---|---|---|")
-        key = lambda r: (r["verdict"] == "PAPER CANDIDATE",
-                         sum(c["status"] == "PASS" for c in r["checks"].values()), r["wo3"])
+        print("\n### Ranking (verdict, then copy simulation w/o best 3, then total)\n")
+        print("| rank | wallet | verdict | copy-sim total | copy-sim w/o best 3 | PASS | FAIL | FLAG | realized SOL | "
+              "w/o best 3 |\n|---|---|---|---|---|---|---|---|---|---|")
+        key = lambda r: (r["verdict"] == "PAPER CANDIDATE", r.get("sim_wo3", 0), r.get("sim_total", 0))
         for i, r in enumerate(sorted(results, key=key, reverse=True), 1):
             n = lambda s: sum(c["status"] == s for c in r["checks"].values())
-            print(f"| {i} | {r['address'][:8]} | {r['verdict']} | {n('PASS')} | {n('FAIL')} | {n('FLAG')} | "
+            print(f"| {i} | {r['address'][:8]} | {r['verdict']} | {100 * r.get('sim_total', 0):+.0f}% | "
+                  f"{100 * r.get('sim_wo3', 0):+.0f}% | {n('PASS')} | {n('FAIL')} | {n('FLAG')} | "
                   f"{r['realized']:+.2f} | {r['wo3']:+.2f} |")
 
 
