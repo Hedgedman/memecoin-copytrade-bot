@@ -8,6 +8,13 @@ Usage (from the copybot folder):
     python whatif_ticks.py --from-id 44 --min-mc 500000              # only entries at/above $500k
     python whatif_ticksv2.py --live --leader-sl 0.4                  # leader-exit style, -40% safety stop
     python whatif_ticksv2.py --from-id 230 --no-exclude-profiles     # include positions of leader profiles
+    python whatif_ticksv2.py --from-id 230 --pool-only --exclude-leaders Leader-D,Leader-F --report-arms
+                                                     # H11 arms table (A/W1/W2/L/R1-R3) on pool-priced trades
+    python whatif_ticksv2.py --from-id 230 --ladder "2:0.25,3:0.25,5:0.5" --ladder-stop 0.2 --stop-after-first entry
+                                                     # extra ladder arm: see class Ladder for every option
+
+PumpSwap ticks recorded before Oct 9 2026 hold the quote vault only; they are re-priced on vault + reconstructed
+virtual_quote_reserves (VirtualSeries, --no-pumpswap-virtual to switch off) and the paper fill is rescaled.
 
 Positions opened under a leader profile (bot/profiles.py, timing["profile"]) are EXCLUDED by default: they
 ran other exits and sizes, so they would pollute a hypothesis on the global exits. The excluded ones are
@@ -42,10 +49,12 @@ How it works
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
 import sqlite3
+import statistics
 from dataclasses import dataclass
 
 import yaml
@@ -74,6 +83,8 @@ class Pos:
     factor: float = 1.0  # kept for compatibility
     leader_exit: float | None = None   # when the bot saw the leader's first sell after our entry
     resolution: str = "tick"           # "tick" = raw pool updates, "1m" = compacted 1-minute bars
+    token: str = ""
+    leader: str = ""
 
 
 def shifted(st: PoolState, net_in: int) -> PoolState:
@@ -132,6 +143,72 @@ def keep_profile(timing, profile: str = "", exclude_profiles: bool = False) -> b
     return not (exclude_profiles and prof != "default")
 
 
+POOL_VENUES = ("pumpfun_curve", "pumpswap_amm")
+
+
+def keep_leader(leader: str, leaders=(), exclude=()) -> bool:
+    """--leaders / --exclude-leaders: address prefixes (any length). Both empty = keep everything."""
+    if leaders and not any(leader.startswith(x) for x in leaders):
+        return False
+    return not any(leader.startswith(x) for x in exclude)
+
+
+# ---- PumpSwap virtual_quote_reserves, reconstructed from vault-only ticks --------------------------------------
+# Ticks recorded before the Oct 9 2026 fix hold the quote VAULT only (real_sol NULL): the price is on vault + V,
+# where V (virtual_quote_reserves, ~17.6 SOL at the start minus fees kept in the vault) is unknown. Each trade
+# between two per-slot states gives one estimate: with k constant across a trade, B0 (Q0 + V) = B1 (Q1' + V)
+# where Q1' is the vault without the LP fee of that trade, so V = (B0 Q0 - B1 Q1') / (B1 - B0). A rolling median
+# over +-15 trades (>= 0.01 SOL) makes it robust; checked against on-chain BuyEvent/SellEvent of our live trades:
+# <= 0.24 SOL error on a 13 SOL V (backtests/exits_runners, Oct 8 2026).
+PUMPSWAP_LP_BPS = 20
+
+
+def virtual_estimates(rows, lp_bps: int = PUMPSWAP_LP_BPS, min_sol: int = 10_000_000):
+    """rows (ts, slot, tok_res, sol_res) ordered by ts -> [(ts, V estimate)] from consecutive per-slot states."""
+    states = []
+    for ts, slot, b, q in rows:
+        if states and states[-1][1] == slot:
+            states[-1] = (ts, slot, b, q)
+        else:
+            states.append((ts, slot, b, q))
+    est = []
+    for (t0, _, b0, q0), (t1, _, b1, q1) in zip(states, states[1:]):
+        db_, dq = b1 - b0, q1 - q0
+        if db_ == 0 or dq == 0 or (db_ > 0) == (dq > 0) or abs(dq) < min_sol:
+            continue
+        qk = q0 + (dq * 10_000 // (10_000 + lp_bps) if dq > 0 else -(-dq * 10_000 // (10_000 - lp_bps)))
+        est.append((t1, (b0 * q0 - b1 * qk) / db_))
+    return est
+
+
+class VirtualSeries:
+    """V(t) for one PumpSwap pool: rolling median of the trade estimates; at(ts) = last estimate at or before ts
+    (the first one before any). Empty (no usable trade) -> at() returns None."""
+
+    def __init__(self, rows, window: int = 15):
+        e = virtual_estimates(rows)
+        self.n = len(e)
+        self.pts = [(e[i][0], statistics.median(x[1] for x in e[max(0, i - window):i + window + 1]))
+                    for i in range(len(e))]
+        self._ts = [p[0] for p in self.pts]
+
+    def at(self, ts):
+        if not self.pts:
+            return None
+        return self.pts[max(bisect.bisect_right(self._ts, ts) - 1, 0)][1]
+
+
+def with_virtual(series, vs: "VirtualSeries"):
+    """Vault-only PumpSwap ticks -> effective reserves (vault + V, real_sol = the vault); other ticks unchanged."""
+    out = []
+    for ts, st, fee, f in series:
+        if st.venue == "pumpswap_amm" and st.real_sol is None:
+            v = vs.at(ts)
+            st = PoolState(st.venue, st.tok_res, max(1, st.sol_res + int(v)), st.real_tok, st.sol_res)
+        out.append((ts, st, fee, f))
+    return out
+
+
 def bars_to_ticks(rows):
     """ticks_1m rows -> pseudo ticks: open at ts, low and high (further-from-open one last) at +20/+40 s, close at
     +59 s. Only the close carries real_* reserves; open/high/low use the close's (curve caps are approximate)."""
@@ -149,10 +226,15 @@ def bars_to_ticks(rows):
 
 
 def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile="",
-         exclude_profiles=False, cover_s=30.0, exclude_flagged=True):
+         exclude_profiles=False, cover_s=30.0, exclude_flagged=True, leaders=(), exclude_leaders=(),
+         pool_only=False, pumpswap_virtual=True):
     """-> (positions, skipped, mc_out, excluded, dropped): excluded = [(id, leader, profile)] dropped by the
     profile filter; dropped = {"not_covered": [(id, seconds between fill and first tick)],
-    "flagged": [(id, leader, reason)], "bars_1m": [ids replayed on 1-minute bars]}."""
+    "flagged": [(id, leader, reason)], "bars_1m": [ids replayed on 1-minute bars],
+    "leader": [ids outside --leaders / --exclude-leaders], "pool_out": [ids not pool-priced, with --pool-only],
+    "vault_only": [PumpSwap ids whose vault-only ticks hold no trade to reconstruct V from: priced on the vault]}.
+    pumpswap_virtual: PumpSwap ticks without real_sol are re-priced on vault + reconstructed V (VirtualSeries) and
+    the paper fill is rescaled to the corrected pool (the bot filled on the vault-only model)."""
     # read-only, so it is safe to point --db at the live bot's database while it runs
     db = sqlite3.connect(db_path if db_path.startswith("file:") else
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
@@ -162,8 +244,10 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
     excluded = [(r[0], r[5], profile_of(r[6])) for r in rows if not keep_profile(r[6], profile, exclude_profiles)]
     rows = [r for r in rows if keep_profile(r[6], profile, exclude_profiles)]
     dropped = {"not_covered": [], "flagged": [(r[0], r[5], flagged[r[0]]) for r in rows if r[0] in flagged],
-               "bars_1m": []}
+               "bars_1m": [], "leader": [], "pool_out": [], "vault_only": []}
     rows = [r for r in rows if r[0] not in flagged]
+    dropped["leader"] = [r[0] for r in rows if not keep_leader(r[5], leaders, exclude_leaders)]
+    rows = [r for r in rows if keep_leader(r[5], leaders, exclude_leaders)]
     out, skipped, mc_out = [], 0, 0
     has_bars = bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='ticks_1m'").fetchone())
     for pid, token, amount, cost, opened, leader, timing in rows:
@@ -197,6 +281,24 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
         for ts, venue, tr, sr, rt, rs in ticks:
             st = PoolState(venue, int(tr), int(sr), None if rt is None else int(rt), None if rs is None else int(rs))
             series.append((ts, st, fees.get(venue, 100), 1.0))
+        if pool_only and series[0][1].venue not in POOL_VENUES:
+            dropped["pool_out"].append(pid)
+            continue
+        if pumpswap_virtual and any(st.venue == "pumpswap_amm" and st.real_sol is None for _, st, _, _ in series):
+            vs = VirtualSeries(db.execute("SELECT ts, slot, tok_res, sol_res FROM ticks WHERE token=? AND venue='pumpswap_amm' "
+                                          "AND ts>=? AND ts<=? ORDER BY ts", (token, opened - 3600, opened + max_after_s)).fetchall())
+            if vs.at(0) is None:                              # no trade to estimate V from: keep the vault-only price
+                dropped["vault_only"].append(pid)
+                vs = None
+            fixed = with_virtual(series, vs) if vs else series
+            model = (json.loads(timing or "{}").get("fill_model") or "").split("+")[0]
+            if not live and model == "pumpswap_amm":          # paper fill on the vault-only model: rescale
+                i0 = max([k for k, x in enumerate(series) if x[0] <= filled] or [0])
+                lam = int((cost - paper_fee) * L)
+                old_out, new_out = series[i0][1].buy_out(lam, series[i0][2]), fixed[i0][1].buy_out(lam, fixed[i0][2])
+                if old_out and new_out:
+                    amount = int(int(amount) * new_out / old_out)
+            series = fixed
         # vault-priced venues (e.g. Meteora DAMM v2): the pool model is only a relative price;
         # scale each tick with the latest Jupiter calibration the bot stored for this token
         if series[0][1].venue not in ("pumpfun_curve", "pumpswap_amm"):
@@ -226,13 +328,14 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
                     if model > 0:
                         factor = m[1] / model
                 series = [(ts, st, fee, factor) for ts, st, fee, _ in series]
-            out.append(Pos(pid, cost, int(amount), 0, series,
-                           leader_exit=leader_exit_ts(db, token, leader, opened), resolution=resolution))
+            out.append(Pos(pid, cost, int(amount), 0, series, leader_exit=leader_exit_ts(db, token, leader, opened),
+                           resolution=resolution, token=token, leader=leader))
             continue
         fee0 = series[0][2]
         entry = int((cost - paper_fee) * L)
         out.append(Pos(pid, cost, int(amount), entry * (10_000 - fee0) // 10_000, series,
-                       leader_exit=leader_exit_ts(db, token, leader, opened), resolution=resolution))
+                       leader_exit=leader_exit_ts(db, token, leader, opened), resolution=resolution,
+                       token=token, leader=leader))
     return out, skipped, mc_out, excluded, dropped
 
 
@@ -327,6 +430,215 @@ def run(p: Pos, style: str, a: float, b: float, sl: float, delay: float, tx_fee:
     ts, st, fee, f = s[-1]
     lam, _ = sell(st, fee, held, net)
     return cash + lam / L * f - tx_fee, True
+
+
+# ---- general ladder exit (--ladder, --report-arms) --------------------------------------------------------------
+@dataclass
+class Ladder:
+    """Sell `share` of the ORIGINAL position when the price reaches `mult` x our entry, each level once.
+    mult = marginal price (spot of the shadow pool after the pool fee, x the vault factor) / our cost per token,
+    so 1.0 = the price at which a small sale returns our entry price. Fills land on the first tick >= trigger +
+    delay and pay the pool-model slippage for that size; a level whose share completes 1.0 sells whatever is left
+    (shares summing to less than 1.0 leave a remainder for the stop / trail / max hold, else censored).
+    stop:      stop until the first fill, on the liquidation value of the whole holding vs its first value (the
+               bot's stop, basis entry_price) or vs cost (basis cost); 0 = none.
+    after:     where the stop goes after the first fill: "entry" (mult <= 1.0), "none", or a fraction of entry
+               ("0.8" = mult <= 0.8).
+    trail:     after the first fill (or once mult >= trail_act when that is > 0) the remainder is sold when mult
+               falls this fraction below its running high since activation; 0 = off.
+    hold_h:    sell the remainder this many hours after entry; 0 = never.
+    Remainder at the end of the data = censored (reported separately, never a win or a loss)."""
+    levels: list
+    stop: float = 0.20
+    after: str = "entry"
+    trail: float = 0.0
+    trail_act: float = 0.0
+    hold_h: float = 0.0
+
+    @property
+    def after_mult(self):
+        if self.after == "none":
+            return None
+        return 1.0 if self.after == "entry" else float(self.after)
+
+    def label(self) -> str:
+        lv = "/".join(f"{int(round(m * 100 - 100))}%:{int(round(s * 100))}" for m, s in self.levels) or "no levels"
+        parts = [f"ladder {lv}", f"stop -{int(round(self.stop * 100))}%" if self.stop else "no stop",
+                f"then {self.after}"]
+        if self.trail:
+            parts.append(f"trail {int(round(self.trail * 100))}%" + (f" from {self.trail_act:g}x" if self.trail_act else ""))
+        if self.hold_h:
+            parts.append(f"max {self.hold_h:g}h")
+        return ", ".join(parts)
+
+
+def parse_ladder(text: str) -> list:
+    """"2:0.25,3:0.25,5:0.5" -> [(2.0, 0.25), (3.0, 0.25), (5.0, 0.5)] sorted by multiple; shares sum to <= 1."""
+    levels = []
+    for part in text.split(","):
+        if not part.strip():
+            continue
+        m, s = part.split(":")
+        levels.append((float(m), float(s)))
+    levels.sort()
+    if sum(s for _, s in levels) > 1.0 + 1e-9:
+        raise ValueError("ladder shares sum to more than 1.0")
+    return levels
+
+
+def marginal_mult(p: "Pos", st: PoolState, fee: int, f: float, net: int) -> float:
+    """Spot price of the shadow pool after the pool fee (x the vault factor) / our cost per token."""
+    sh = shifted(st, net)
+    return sh.sol_res / sh.tok_res * (10_000 - fee) / 10_000 * f / (p.cost * L / p.tokens)
+
+
+@dataclass
+class LadderResult:
+    value: float          # cash + remainder valued at the last tick (remainder only when censored)
+    censored: bool
+    cash: float           # SOL realised (after fees)
+    remainder: float      # fraction of the original position still held at the end
+    fills: list           # [(ts, kind, share of original, proceeds SOL, impact)]  kind = "2x", "stop", "trail", "hold"
+
+
+def run_ladder(p: "Pos", lad: Ladder, delay: float, tx_fee: float, stop_basis: str = "entry_price") -> LadderResult:
+    s = p.series
+    ts0 = s[0][0]
+    held, net, cash = p.tokens, p.entry_net, 0.0
+    levels = list(lad.levels)
+    done = 0.0                              # share of the original position sold so far
+    ref = None
+    high = None                             # running high of mult since trailing activated
+    first = False
+    fills = []
+    i = 0
+    while i < len(s) and held > 0:
+        ts, st, fee, f = s[i]
+        mult = marginal_mult(p, st, fee, f, net)
+        lam, _ = sell(st, fee, held, net)
+        total = cash + lam / L * f
+        if ref is None:
+            ref = total
+        fire, close = [], None
+        if lad.trail and (first or (lad.trail_act and mult >= lad.trail_act)):
+            high = mult if high is None else max(high, mult)
+        if not first and lad.stop and (total / ref - 1 if stop_basis == "entry_price" else total / p.cost - 1) <= -lad.stop:
+            close = "stop"
+        elif first and lad.after_mult is not None and mult <= lad.after_mult:
+            close = "stop"
+        elif high is not None and mult <= high * (1 - lad.trail):
+            close = "trail"
+        elif lad.hold_h and ts >= ts0 + lad.hold_h * 3600:
+            close = "hold"
+        else:
+            while levels and mult >= levels[0][0]:
+                fire.append(levels.pop(0))
+        if not fire and close is None:
+            i += 1
+            continue
+        j = i
+        while j < len(s) and s[j][0] < ts + delay:
+            j += 1
+        if j >= len(s):                                   # the data ended before the fill landed
+            break
+        ts2, st2, fee2, f2 = s[j]
+        if close is not None:
+            lam2, _ = sell(st2, fee2, held, net)
+            cash += lam2 / L * f2 - tx_fee
+            fills.append((ts2, close, held / p.tokens, lam2 / L * f2, 0.0))
+            held = 0
+            break
+        for m, share in fire:
+            done += share                                     # shares completing 1.0 sell whatever is left
+            n = held if done >= 1.0 - 1e-9 else min(held, int(p.tokens * share))
+            lam2, gross = sell(st2, fee2, n, net)
+            spot_val = marginal_mult(p, st2, fee2, f2, net) * (p.cost / p.tokens) * n
+            cash += lam2 / L * f2 - tx_fee
+            fills.append((ts2, f"{m:g}x", n / p.tokens, lam2 / L * f2, 1 - (lam2 / L * f2) / spot_val if spot_val else 0.0))
+            held -= n
+            net -= gross
+            if held <= 0:
+                break
+        first = True
+        if high is None and lad.trail and not lad.trail_act:
+            high = marginal_mult(p, st2, fee2, f2, net) if held > 0 else None
+        i = j + 1
+    if held <= 0:
+        return LadderResult(cash, False, cash, 0.0, fills)
+    ts, st, fee, f = s[-1]
+    rem = sell(st, fee, held, net)[0] / L * f
+    return LadderResult(cash + rem, True, cash, held / p.tokens, fills)
+
+
+# Arms of the exit forward test (CHECKLIST_30_TRADES.md, HYPOTHESIS 11). Fixed arms run exactly as the bot does
+# (take-profit on the liquidation value of the whole holding vs cost, stop vs the first value); ladder arms through
+# run_ladder. Do not edit a registered arm: add a new name.
+ARMS = {
+    "A":  ("fixed", (0.30, 0.20), "TP +30% / SL -20% (current bot)"),
+    "W1": ("fixed", (2.00, 0.20), "TP +200% / SL -20%"),
+    "W2": ("fixed", (4.00, 0.20), "TP +400% / SL -20%"),
+    "L":  ("ladder", Ladder([(2.0, 0.25), (3.0, 0.25), (5.0, 0.25), (9.0, 0.25)], stop=0.20, after="entry"),
+           "25% at +100/+200/+400/+800%, stop -20% until the first fill, then stop at entry"),
+}
+
+
+def run_arm(p: "Pos", arm, delay: float, tx_fee: float, stop_basis: str) -> tuple[float, bool]:
+    """-> (final value in SOL, censored). Censored = the data ended while still holding (value = at the last tick)."""
+    kind, spec = arm[0], arm[1]
+    if kind == "fixed":
+        return run(p, "fixed", spec[0], 0, spec[1], delay, tx_fee, stop_basis, 0.5)
+    if kind == "trailing":
+        return run(p, "trailing", spec[0], spec[1], spec[2], delay, tx_fee, stop_basis, 0.5)
+    r = run_ladder(p, spec, delay, tx_fee, stop_basis)
+    return r.value, r.censored
+
+
+def max_drawdown(pnls) -> float:
+    """Deepest peak-to-trough fall of the cumulative PnL, trades in order."""
+    cum = peak = dd = 0.0
+    for x in pnls:
+        cum += x
+        peak = max(peak, cum)
+        dd = min(dd, cum - peak)
+    return dd
+
+
+def arms_table(data, arms: dict, delay: float, tx_fee: float, stop_basis: str, title: str = "ARMS") -> dict:
+    """One table: per arm n (uncensored), total SOL, without best 1 / best 3, wins, median return, max drawdown,
+    censored (count, mark value of what is still held), total on the common set (uncensored in every arm), top
+    tokens. Censored trades are never a win or a loss. Returns {arm: {"pnl": {pid: pnl}, "censored": {pid: pnl}}}."""
+    res = {}
+    for name, arm in arms.items():
+        pnl, cens = {}, {}
+        for p in data:
+            v, c = run_arm(p, arm, delay, tx_fee, stop_basis)
+            (cens if c else pnl)[p.pid] = v - p.cost
+        res[name] = {"pnl": pnl, "censored": cens}
+    common = set(p.pid for p in data)
+    for r in res.values():
+        common &= set(r["pnl"])
+    tok = {p.pid: (p.token[:8] if p.token else f"#{p.pid}") for p in data}
+    print(f"\n{title}: {len(data)} trades; common set (uncensored in every arm) = {len(common)}")
+    hdr = (f"  {'arm':<4} {'n':>3} {'total':>7} {'w/o best1':>9} {'w/o best3':>9} {'wins':>6} {'median':>7} "
+           f"{'max DD':>7} {'censored (mark)':>16} {'common':>7}  drivers")
+    print(hdr); print("  " + "-" * (len(hdr) + 20))
+    for name, r in res.items():
+        v = sorted(r["pnl"].values(), reverse=True)
+        n = len(v)
+        if not n:
+            print(f"  {name:<4} {0:>3}   (all censored)")
+            continue
+        wins = sum(x > 0 for x in v)
+        med = sorted(r["pnl"][pid] / next(p.cost for p in data if p.pid == pid) for pid in r["pnl"])[n // 2]
+        top = sorted(r["pnl"].items(), key=lambda kv: -kv[1])[:3]
+        cens_txt = f"{len(r['censored'])} ({sum(r['censored'].values()):+.2f})"
+        print(f"  {name:<4} {n:>3} {sum(v):>+7.2f} {sum(v[1:]):>+9.2f} {sum(v[3:]):>+9.2f} {wins:>3}/{n:<2} {100 * med:>+6.1f}% "
+              f"{max_drawdown([r['pnl'][pid] for pid in sorted(r['pnl'])]):>+7.2f} "
+              f"{cens_txt:>16} "
+              f"{sum(r['pnl'][pid] for pid in common):>+7.2f}  " + ", ".join(f"{tok[pid]} {x:+.2f}" for pid, x in top))
+    for name, arm in arms.items():
+        print(f"  {name:<4} = {arm[2]}")
+    return res
 
 
 VENUE_CLASSES = (("pool", "pump.fun curve / PumpSwap: exact pool math, streamed"),
@@ -452,6 +764,23 @@ def main():
                     help="a tick series must start within this many seconds of our fill to be replayable")
     ap.add_argument("--leader-sl", type=float, default=None,
                     help="extra safety-stop row for the leader-exit style, e.g. 0.4 (rows always include off/20/30/40/60%%)")
+    ap.add_argument("--leaders", default="", help="only these leaders (comma-separated address prefixes)")
+    ap.add_argument("--exclude-leaders", default="", help="drop these leaders (comma-separated address prefixes)")
+    ap.add_argument("--pool-only", action="store_true", help="only pool-priced positions (pump.fun curve, PumpSwap)")
+    ap.add_argument("--pumpswap-virtual", action=argparse.BooleanOptionalAction, default=True,
+                    help="re-price vault-only PumpSwap ticks on vault + reconstructed virtual_quote_reserves (default on)")
+    ap.add_argument("--ladder", default="", help='extra arm: sell shares of the ORIGINAL position at multiples of our '
+                    'entry, "2:0.25,3:0.25,5:0.5" (shares sum to <= 1; a level completing 1.0 closes the position)')
+    ap.add_argument("--ladder-stop", type=float, default=0.20, help="ladder: stop until the first fill (0 = none)")
+    ap.add_argument("--stop-after-first", default="entry",
+                    help="ladder: stop after the first fill: entry | none | fraction of entry (e.g. 0.8)")
+    ap.add_argument("--ladder-trail", type=float, default=0.0,
+                    help="ladder: after the first fill sell the remainder when the price falls this fraction from its high")
+    ap.add_argument("--ladder-trail-act", type=float, default=0.0,
+                    help="ladder: the trail activates at this multiple of entry instead of at the first fill")
+    ap.add_argument("--ladder-max-hold-h", type=float, default=0.0, help="ladder: sell the remainder after H hours")
+    ap.add_argument("--report-arms", action="store_true",
+                    help="print only the arms table (ARMS + --ladder) on the selected trades and exit")
     args = ap.parse_args()
     try:
         cfg = yaml.safe_load(open(args.config))
@@ -471,10 +800,22 @@ def main():
     basis = ex.get("stop_basis", "cost")
 
     excl = args.exclude_profiles and not args.profile
+    split = lambda s: tuple(x.strip() for x in s.split(",") if x.strip())
     data, skipped, mc_out, excluded, dropped = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
                                                     args.max_after, args.min_mc, args.max_mc, args.live, args.profile,
-                                                    excl, args.cover_s, not args.include_flagged)
+                                                    excl, args.cover_s, not args.include_flagged, split(args.leaders),
+                                                    split(args.exclude_leaders), args.pool_only, args.pumpswap_virtual)
     print(flagged_note({pid: why for pid, _, why in dropped["flagged"]}, args.include_flagged))
+    if args.leaders or args.exclude_leaders:
+        print(f"leader filter: only {args.leaders or 'all'}, excluding {args.exclude_leaders or 'none'}: "
+              f"{len(dropped['leader'])} positions dropped")
+    if args.pool_only:
+        print(f"pool-only: {len(dropped['pool_out'])} positions on other venues dropped")
+    if dropped["vault_only"]:
+        print(f"PumpSwap virtual reserves not reconstructable (no trade in the ticks), priced on the vault only: "
+              + ", ".join(f"#{pid}" for pid in dropped["vault_only"]))
+    print("PumpSwap: vault-only ticks re-priced on vault + reconstructed virtual_quote_reserves"
+          if args.pumpswap_virtual else "PumpSwap: vault-only ticks used as recorded (--pumpswap-virtual to correct)")
     for pid, leader, why in dropped["flagged"]:
         print(f"  #{pid:<5} {leader[:8]}  {why}")
     if dropped["not_covered"]:
@@ -504,6 +845,16 @@ def main():
         return
     print(f"exit delay {delay:g}s | tx fee {fee} SOL per sell | pool fees {fees} bps | stop basis {basis}"
           f" | stop confirmation {args.confirm:g}s (hard stop -{int(args.hard*100)}%)")
+    arms = dict(ARMS)
+    if args.ladder:
+        lad = Ladder(parse_ladder(args.ladder), args.ladder_stop, args.stop_after_first, args.ladder_trail,
+                     args.ladder_trail_act, args.ladder_max_hold_h)
+        arms["cli"] = ("ladder", lad, lad.label())
+    if args.report_arms:
+        arms_table(data, arms, delay, fee, basis, title=f"ARMS from id {args.from_id}")
+        print("  n = uncensored trades; total / w/o best / wins / median / max DD on those only; censored = the data "
+              "ended while still holding (their mark PnL in brackets, not counted)")
+        return
     print("Cells: total PnL in SOL, wins/trades, c = censored (data ended while still holding)")
 
     # --- how high did trades go? (the 'potential profit') ---
