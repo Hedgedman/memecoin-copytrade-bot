@@ -156,3 +156,9 @@ HYPOTHESIS 11 (what-if only, registered 2026-10-11 11:40 UTC, from id 520; analy
   S2 in-sample (59): A +7.10 (+3.16), R2 +7.67 (+2.08), L +13.61 (-8.89).
   Status (one line, zsh):
     cd ~/Documents/copybot-dev && source .venv/bin/activate && echo "== H11 S1" && python whatif_ticksv2.py --from-id 520 --pool-only --exclude-leaders Leader-D,Leader-F,Leader-O,Leader-M --report-arms | grep -E "positions with tick data|^ARMS|^  (arm|A |W1|W2|L |R[123] |trade markers)"; echo "== H11 S2" && python whatif_ticksv2.py --from-id 520 --pool-only --leaders Leader-G,Leader-E,Leader-H --report-arms | grep -E "positions with tick data|^ARMS|^  (arm|A |W1|W2|L |R[123] |trade markers)"
+
+DEV RESTART 2026-10-11 14:41 (local), next id 520: PumpSwap prices corrected from
+here (vault + virtual_quote_reserves live). The bot was down from 2026-10-10 ~22:35
+local to 2026-10-11 14:41. DATA RULE: positions that were open during that downtime
+are excluded from all tests (their exits weren't monitored): PLaYu3PK, EcZndAER,
+AEPBdj3R, HwJyyniK.
