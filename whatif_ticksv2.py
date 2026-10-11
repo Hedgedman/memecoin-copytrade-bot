@@ -227,7 +227,7 @@ def bars_to_ticks(rows):
 
 def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=None, live=False, profile="",
          exclude_profiles=False, cover_s=30.0, exclude_flagged=True, leaders=(), exclude_leaders=(),
-         pool_only=False, pumpswap_virtual=True):
+         pool_only=False, pumpswap_virtual=True, to_id=None):
     """-> (positions, skipped, mc_out, excluded, dropped): excluded = [(id, leader, profile)] dropped by the
     profile filter; dropped = {"not_covered": [(id, seconds between fill and first tick)],
     "flagged": [(id, leader, reason)], "bars_1m": [ids replayed on 1-minute bars],
@@ -240,7 +240,8 @@ def load(db_path, from_id, fees, paper_fee, max_after_s, min_mc=None, max_mc=Non
                          f"file:{os.path.abspath(os.path.expanduser(db_path))}?mode=ro", uri=True)
     flagged = flagged_positions(db) if exclude_flagged else {}
     rows = db.execute("SELECT id, token, token_amount, cost, opened_at, leader, timing FROM positions WHERE paper=? "
-                      "AND chain='solana' AND status='closed' AND id>=? ORDER BY id", (0 if live else 1, from_id)).fetchall()
+                      "AND chain='solana' AND status='closed' AND id>=? AND id<=? ORDER BY id",
+                      (0 if live else 1, from_id, to_id if to_id is not None else 2**62)).fetchall()
     excluded = [(r[0], r[5], profile_of(r[6])) for r in rows if not keep_profile(r[6], profile, exclude_profiles)]
     rows = [r for r in rows if keep_profile(r[6], profile, exclude_profiles)]
     dropped = {"not_covered": [], "flagged": [(r[0], r[5], flagged[r[0]]) for r in rows if r[0] in flagged],
@@ -579,6 +580,17 @@ ARMS = {
     "W2": ("fixed", (4.00, 0.20), "TP +400% / SL -20%"),
     "L":  ("ladder", Ladder([(2.0, 0.25), (3.0, 0.25), (5.0, 0.25), (9.0, 0.25)], stop=0.20, after="entry"),
            "25% at +100/+200/+400/+800%, stop -20% until the first fill, then stop at entry"),
+    # R1-R3: designed Oct 11 2026 from the runner anatomy of S1 #230-#519 (backtests/runners_s1/RESULT.md), H11.
+    "R1": ("ladder", Ladder([(1.3, 0.75), (3.0, 0.125), (5.0, 0.125)], stop=0.20, after="0.8", trail=0.20,
+                            trail_act=3.0, hold_h=24),
+           "75% at +30%, stop -20% until then; remainder: stop at 0.8x entry, 12.5% at 3x, 12.5% at 5x, "
+           "trail 20% from 3x, max 24 h"),
+    "R2": ("ladder", Ladder([(1.5, 0.50), (3.0, 0.25), (5.0, 0.25)], stop=0.20, after="entry", trail=0.20,
+                            trail_act=3.0, hold_h=24),
+           "50% at +50%, stop -20% until then; remainder: stop at entry, 25% at 3x, 25% at 5x, trail 20% from 3x, "
+           "max 24 h"),
+    "R3": ("ladder", Ladder([(1.3, 0.75), (2.0, 0.125), (3.0, 0.125)], stop=0.20, after="entry"),
+           "75% at +30%, stop -20% until then; remainder: stop at entry, 12.5% at 2x, 12.5% at 3x"),
 }
 
 
@@ -744,6 +756,7 @@ def main():
     ap.add_argument("--db", default="copybot.db")
     ap.add_argument("-c", "--config", default="config.yaml")
     ap.add_argument("--from-id", type=int, default=1)
+    ap.add_argument("--to-id", type=int, default=None, help="last position id to include (H11 halves)")
     ap.add_argument("--delay", type=float, default=None, help="exit landing delay in s (default: config)")
     ap.add_argument("--sl", type=float, default=None, help="safety stop for trailing/partial (default: config)")
     ap.add_argument("--part", type=float, default=0.5, help="fraction sold at TP1 in the partial style")
@@ -804,7 +817,8 @@ def main():
     data, skipped, mc_out, excluded, dropped = load(args.db, args.from_id, fees, float(sc.get("paper_fee_per_tx_sol", 0)),
                                                     args.max_after, args.min_mc, args.max_mc, args.live, args.profile,
                                                     excl, args.cover_s, not args.include_flagged, split(args.leaders),
-                                                    split(args.exclude_leaders), args.pool_only, args.pumpswap_virtual)
+                                                    split(args.exclude_leaders), args.pool_only, args.pumpswap_virtual,
+                                                    args.to_id)
     print(flagged_note({pid: why for pid, _, why in dropped["flagged"]}, args.include_flagged))
     if args.leaders or args.exclude_leaders:
         print(f"leader filter: only {args.leaders or 'all'}, excluding {args.exclude_leaders or 'none'}: "
@@ -851,7 +865,10 @@ def main():
                      args.ladder_trail_act, args.ladder_max_hold_h)
         arms["cli"] = ("ladder", lad, lad.label())
     if args.report_arms:
-        arms_table(data, arms, delay, fee, basis, title=f"ARMS from id {args.from_id}")
+        ids = [p.pid for p in data]
+        arms_table(data, arms, delay, fee, basis, title=f"ARMS from id {args.from_id}"
+                   + (f" to {args.to_id}" if args.to_id is not None else ""))
+        print("  trade markers: " + ", ".join(f"trade {k} = #{ids[k - 1]}" for k in (1, 25, 50, 100, 150) if k <= len(ids)))
         print("  n = uncensored trades; total / w/o best / wins / median / max DD on those only; censored = the data "
               "ended while still holding (their mark PnL in brackets, not counted)")
         return

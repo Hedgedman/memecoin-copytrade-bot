@@ -144,6 +144,14 @@ def test_arms():
     rowA = [l for l in text.splitlines() if l.strip().startswith("A ")][0]
     assert rowA.split()[1] == "2" and "1 (" in rowA and "AAAA" in rowA, rowA
     print("arms table: fixed and ladder arms, censored trades counted separately, drivers named")
+    # HYPOTHESIS 11 (CHECKLIST_30_TRADES.md): the registered arms must not change
+    reg = {"A": ("fixed", (0.30, 0.20)), "W1": ("fixed", (2.00, 0.20)), "W2": ("fixed", (4.00, 0.20)),
+           "L": ("ladder", Ladder([(2.0, 0.25), (3.0, 0.25), (5.0, 0.25), (9.0, 0.25)], 0.20, "entry", 0.0, 0.0, 0.0)),
+           "R1": ("ladder", Ladder([(1.3, 0.75), (3.0, 0.125), (5.0, 0.125)], 0.20, "0.8", 0.20, 3.0, 24)),
+           "R2": ("ladder", Ladder([(1.5, 0.50), (3.0, 0.25), (5.0, 0.25)], 0.20, "entry", 0.20, 3.0, 24)),
+           "R3": ("ladder", Ladder([(1.3, 0.75), (2.0, 0.125), (3.0, 0.125)], 0.20, "entry", 0.0, 0.0, 0.0))}
+    assert {k: (v[0], v[1]) for k, v in ARMS.items()} == reg, "a registered H11 arm changed: add a new name instead"
+    print("H11 arms registered as in CHECKLIST_30_TRADES.md")
 
 
 def test_filters():
@@ -192,6 +200,8 @@ def test_filters():
     assert ids(data) == [230, 232]
     data, _, _, _, dropped = load(path, 230, FEES, 0.01, 3600, pool_only=True)
     assert ids(data) == [230, 231, 233] and dropped["pool_out"] == [232]
+    data, *_ = load(path, 230, FEES, 0.01, 3600, to_id=231)
+    assert ids(data) == [230, 231]                                              # --to-id (H11 halves)
     assert all(p.token == f"TOK{p.pid}" and p.leader.startswith("LEADER_") for p in data)
     print("filters: --leaders / --exclude-leaders (prefixes), --pool-only, token + leader on Pos")
 

@@ -126,3 +126,33 @@ becomes the screening gate for new leaders only if the copy-sim (check 12) has
 Spearman rho >= 0.54 vs our paper PnL over the 14 calibration leaders AND it
 marks Leader-E PAPER CANDIDATE while rejecting Leader-D and Leader-AI.
 Otherwise it stays informational and new leaders are judged in paper only.
+
+HYPOTHESIS 11 (what-if only, registered 2026-10-11 11:40 UTC, from id 520; analysis in backtests/runners_s1/RESULT.md):
+  S1 = all Solana leaders EXCEPT Leader-D, Leader-F, Leader-O, Leader-M; pool-priced positions only (pump.fun curve /
+  PumpSwap, --pool-only; PumpSwap on vault + reconstructed virtual_quote_reserves); flagged and profile positions
+  excluded; FUTURE trades only (id >= 520). Arms = whatif_ticksv2.py ARMS (pinned by tests/test_whatif_ladder.py);
+  fills on the first tick >= trigger + paper_land_delay_s on the shadow pool, pool fee + 0.01 SOL per sell, stop
+  basis entry_price. Level multiples are on the marginal price (spot of the shadow pool after the pool fee / our cost
+  per token); the fixed arms run as the bot does (take-profit on the liquidation value of the whole holding vs cost,
+  stop vs the first value). Each ladder level fires once and sells a share of the ORIGINAL position.
+    A  fixed TP +30% / SL -20% (the bot)
+    W1 fixed TP +200% / SL -20%
+    W2 fixed TP +400% / SL -20%
+    L  25% at 2x / 3x / 5x / 9x of entry (+100/+200/+400/+800%), stop -20% until the first fill, then the stop moves
+       to entry (price <= 1.0x entry sells the rest); no trailing, no time limit
+    R1 75% at 1.3x, stop -20% until the first fill; then the remainder's stop sits at 0.8x entry, 12.5% at 3x, 12.5%
+       at 5x, trailing 20% from the running high once 3x was reached, remainder sold 24 h after entry
+    R2 50% at 1.5x, stop -20% until the first fill; then the remainder's stop sits at entry (1.0x), 25% at 3x, 25% at
+       5x, trailing 20% from the running high once 3x was reached, remainder sold 24 h after entry
+    R3 75% at 1.3x, stop -20% until the first fill; then the remainder's stop sits at entry, 12.5% at 2x, 12.5% at 3x
+  Judge at 100 replayable pool-priced S1 trades: the best arm must beat A on total AND without its best 3, AND be
+  positive in both halves (trades 1-50 and 51-100: --to-id / --from-id with the "trade 50 = #..." marker the status
+  command prints). Censored trades (data ended while still holding) are reported separately and never count as a win
+  or a loss. S2 = Leader-G, Leader-E, Leader-H (>= 20 closed AND PnL > 0 without best 2 over all history on
+  2026-10-11) is reported and judged at 50 trades with the same rule. Only the winner of this forward test may go to a
+  new live test; the bot keeps A until then. No arm is changed or added after this registration.
+  In-sample on S1 #230-#519 (131 trades; the rules were designed on these, so this is NOT evidence): A +12.03 SOL
+  (w/o best 3 +7.82), W1 -6.00, W2 -3.99, L -1.89, R1 +11.01 (+6.67), R2 +13.89 (+8.30), R3 +6.44 (+1.71).
+  S2 in-sample (59): A +7.10 (+3.16), R2 +7.67 (+2.08), L +13.61 (-8.89).
+  Status (one line, zsh):
+    cd ~/Documents/copybot-dev && source .venv/bin/activate && echo "== H11 S1" && python whatif_ticksv2.py --from-id 520 --pool-only --exclude-leaders Leader-D,Leader-F,Leader-O,Leader-M --report-arms | grep -E "positions with tick data|^ARMS|^  (arm|A |W1|W2|L |R[123] |trade markers)"; echo "== H11 S2" && python whatif_ticksv2.py --from-id 520 --pool-only --leaders Leader-G,Leader-E,Leader-H --report-arms | grep -E "positions with tick data|^ARMS|^  (arm|A |W1|W2|L |R[123] |trade markers)"
