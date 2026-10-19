@@ -14,7 +14,8 @@ from bot.main import Bot
 from bot.store import Store
 from bot.xchain.paper import TRANSFER, XchainPaperTrader, pad_addr
 from bot.xchain.relay import CHAIN_NAMES, RateLimiter, parse_request
-from bot.xchain.watcher import XchainWatcher, usdc_account
+from bot.xchain.watcher import XchainWatcher, usdc_account, USDC_SOL
+SPL_OWNER = "11111111111111111111111111111111"      # any valid base58 key
 from bot.chains.solana import tx_from_notification
 from tests.test_xchain import EVM, PAYOUT, REQS, W, FakeRelay, fresh, sig
 from tests.test_xchain_paper import E, GAS, TOK, TOK2, FakeRelay as PriceRelay, FakeRpc, settle, trade
@@ -124,8 +125,11 @@ async def tier_tests():
 
 
 async def payout_stream_tests():
-    acct = usdc_account(W)
-    assert acct in [k["pubkey"] for k in PAYOUT["transaction"]["message"]["accountKeys"]]
+    # the leader string is a pseudonym (not base58), so usdc_account() cannot derive his USDC account:
+    # take it from the fixture's token balances (owner == W, USDC mint) instead
+    bal = next(b for b in PAYOUT["meta"]["postTokenBalances"] if b["owner"] == W and b["mint"] == USDC_SOL)
+    acct = PAYOUT["transaction"]["message"]["accountKeys"][bal["accountIndex"]]["pubkey"]
+    assert usdc_account(SPL_OWNER) != acct                                # derivation still works for real keys
     store = Store(tempfile.mktemp())
     client = FakeRelay(age_s=8)
     w = XchainWatcher({"leaders": {W: EVM}, "price_offsets_s": [0], "resolve_timeout_s": 5}, store, client)
