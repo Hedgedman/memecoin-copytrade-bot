@@ -117,12 +117,12 @@ def main():
             o["open"].append(pnl)
             open_rows.append((pid, leader, chain, json.loads(timing or "{}"), cost, pnl, opened))
     print("OUR PAPER (robinhood/bsc)        gaps: + = we paid more (buy) / got more (sell) than him")
-    print(f"{'leader':<9} {'chain':<11} {'profile':<12} {'copied':>6} {'skipped':>7} {'entry gap':>9} {'sell gap':>8} "
+    print(f"{'leader':<9} {'chain':<11} {'profile':<16} {'copied':>6} {'skipped':>7} {'entry gap':>9} {'sell gap':>8} "
           f"{'closed':>6} {'won':>4} {'closed PnL $':>12} {'open':>4} {'open PnL $':>10}")
     tot = defaultdict(float)
     for (leader, chain, prof), o in sorted(ours.items(), key=lambda kv: (-kv[1]["copied"] - len(kv[1]["open"]), kv[0])):
         cl, op = o["closed"], [x for x in o["open"] if x is not None]
-        print(f"{leader[:8]:<9} {chain:<11} {prof[:12]:<12} {o['copied']:>6} {o['skipped']:>7} {f(med(o['entry']), '+.1f', '%'):>9} "
+        print(f"{leader[:8]:<9} {chain:<11} {prof[:16]:<16} {o['copied']:>6} {o['skipped']:>7} {f(med(o['entry']), '+.1f', '%'):>9} "
               f"{f(med(o['sellgap']), '+.1f', '%'):>8} {len(cl):>6} {sum(x > 0 for x in cl):>4} "
               f"{(f'{sum(cl):+,.0f}' if cl else '-'):>12} {len(o['open']):>4} {(f'{sum(op):+,.0f}' if op else '-'):>10}")
         tot["copied"] += o["copied"]; tot["skipped"] += o["skipped"]; tot["closed"] += len(cl)
@@ -138,7 +138,7 @@ def main():
         print("\nOPEN POSITIONS")
         for pid, leader, chain, t, cost, pnl, opened in sorted(open_rows):
             age = (time.time() - opened) / 3600
-            print(f"  #{pid:<5} {leader[:8]:<9} {chain:<10} {t.get('profile', 'default')[:12]:<12} "
+            print(f"  #{pid:<5} {leader[:8]:<9} {chain:<10} {t.get('profile', 'default')[:16]:<16} "
                   f"{t.get('symbol', '')[:12]:<12} cost ${cost:>8,.2f}  "
                   f"now {f(pnl, '+,.2f', ' $'):>12} ({f(100 * pnl / cost if pnl is not None else None, '+.0f', '%')})"
                   f"  held {age:.1f} h")

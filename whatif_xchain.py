@@ -110,7 +110,7 @@ def gap_filter(db, data):
 
 
 def by_leader(db, data):
-    print(f"{'leader':<9} {'profile':<12} {'pos':>4} {'closed':>6} {'actual $':>10} {'mirror-60 $':>12} {'wins':>7} "
+    print(f"{'leader':<9} {'profile':<16} {'pos':>4} {'closed':>6} {'actual $':>10} {'mirror-60 $':>12} {'wins':>7} "
           f"{'entry gap':>9} {'sell gap':>8} {'sell seen':>9} {'sell filled':>11}")
     cols = {r[1] for r in db.execute("PRAGMA table_info(xchain_fills)")}
     groups = sorted({(d[6], d[7]) for d in data}, key=lambda g: -sum(1 for d in data if (d[6], d[7]) == g))
@@ -123,7 +123,7 @@ def by_leader(db, data):
         sells = [f for f in fills if f[0] == "sell"]
         res = [simulate(d[5], "mirror", 0.60) for d in rows]
         actual = closed_pnl(rows)
-        print(f"{who[:8]:<9} {prof[:12]:<12} {len(rows):>4} {sum(d[4] == 'closed' for d in rows):>6} {actual:>+10,.0f} "
+        print(f"{who[:8]:<9} {prof[:16]:<16} {len(rows):>4} {sum(d[4] == 'closed' for d in rows):>6} {actual:>+10,.0f} "
               f"{sum(r[0] for r in res):>+12,.0f} {sum(r[0] > 0 for r in res):>3}/{len(res):<3} "
               f"{fmt(avg([f[1] for f in fills if f[0] == 'buy']), '+.1f', '%'):>9} "
               f"{fmt(avg([f[1] for f in sells]), '+.1f', '%'):>8} {fmt(avg([f[2] for f in sells]), '.0f', 's'):>9} "
@@ -192,7 +192,7 @@ def main():
         print()
         for pid, chain, cost, exitv, status, ev, who, prof in data:
             pnl, c = simulate(ev, "mirror", 0.60)
-            print(f"  #{pid:<5} {who[:8]:<9} {prof[:12]:<12} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
+            print(f"  #{pid:<5} {who[:8]:<9} {prof[:16]:<16} {chain:<10} cost ${cost:>8,.2f}  {status:<6} actual "
                   f"{'' if exitv is None else f'${exitv - cost:+,.2f}':>10}  sim ${pnl:+,.2f}{' (c)' if c else ''}")
 
 
