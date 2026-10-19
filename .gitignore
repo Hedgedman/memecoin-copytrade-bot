@@ -10,3 +10,19 @@ bot/chains/solana_backup*.py
 data/
 backtests/
 flagged_positions.json
+# secrets / local state (public-repo hygiene)
+.env
+.env.*
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backups/
+*.bundle
+.claude/
+memory/
+.DS_Store
+notes_local/
+leaders_map.local.txt
+CLAUDE.md

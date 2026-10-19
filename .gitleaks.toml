@@ -1,0 +1,6 @@
+# gitleaks config: test fixtures hold public on-chain data (addresses, tx hashes), not secrets.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = ['''tests/fixtures/.*\.json$''']
