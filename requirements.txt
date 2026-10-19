@@ -4,3 +4,4 @@ eth-abi>=4
 websockets>=12
 solders>=0.21
 pyyaml>=6
+matplotlib>=3.8     # scripts/export_results.py (charts)
